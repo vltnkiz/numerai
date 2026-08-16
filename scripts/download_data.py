@@ -1,11 +1,11 @@
 """Download Numerai datasets into datasets/{version}/ via NumerAPI.
 
 Interactive usage (pick version, then files, from an in-terminal menu):
-    python download_data.py
+    python scripts/download_data.py
 
 Scripted usage (skips the menus):
-    python download_data.py --datasets features.json validation.parquet
-    python download_data.py --version 5.1 --force
+    python scripts/download_data.py --datasets features.json validation.parquet
+    python scripts/download_data.py --version 5.1 --force
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 from numerapi import NumerAPI
 from prompt_toolkit.shortcuts import button_dialog, checkboxlist_dialog, radiolist_dialog
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 AVAILABLE_DATASETS = [
     "features.json",

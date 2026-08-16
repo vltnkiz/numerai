@@ -16,10 +16,12 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .ipynb_checkpoints/
+.mcp.json
 
 # Jupyter
 jupyter.log
 .jupyter/
+JUPYTER.md
 
 # Local machine-specific settings and installed skill libraries (tooling, not research)
 .claude/

@@ -6,7 +6,7 @@ set -euo pipefail
 
 PORT=8888
 VENV=~/ml-venv
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG="$PROJECT_ROOT/jupyter.log"
 
 if ss -tln 2>/dev/null | grep -q "127.0.0.1:${PORT} "; then
