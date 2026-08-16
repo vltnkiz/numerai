@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 1 — What Is Feature Exposure?</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<div class="kicker">Lesson 1 of Feature Neutralization</div>
+<h1>What Is Feature Exposure?</h1>
+<p class="lede">Why a model that scores well in backtests can still blow up on Numerai — and how to measure the risk before it happens.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong> read
+  <a href="https://forum.numer.ai/t/model-diagnostics-feature-exposure/899" target="_blank" rel="noopener">"Model Diagnostics: Feature Exposure"</a>
+  on the Numerai forum before or after this lesson — everything here is grounded in it.
+</div>
+
+<h2>The problem: features aren't stable</h2>
+<p>
+  Numerai's data is organized into <strong>eras</strong> — roughly, time periods. A feature that strongly
+  predicts the target in one era can be useless, or even actively misleading, in another. This is called
+  <strong>non-stationarity</strong>: the statistical relationship between feature and target shifts over time,
+  because markets change regime.
+</p>
+<p>
+  Now imagine a model that has learned to lean heavily on just one or two features — say, because those features
+  happened to work great across most of the training eras. As long as the market keeps behaving the way it did in
+  training, the model looks great. The moment the regime shifts and those particular features stop working, the
+  model's predictions collapse all at once. One Numerai participant described this happening to their own model:
+  it performed well for a long stretch, then "burned" hard when a regime change hit the features it had over-relied on.
+</p>
+
+<h2>The insight: measure reliance, not just accuracy</h2>
+<p>
+  A model's overall correlation with the target tells you <em>how good</em> its predictions are on average. It tells
+  you nothing about <em>how</em> it got there — whether that skill is spread across many features (robust) or
+  concentrated in a few (fragile). <strong>Feature exposure</strong> is the diagnostic that measures the second thing.
+</p>
+<p>
+  Formally: for each feature, take the <strong>Spearman rank correlation</strong> between the model's predictions
+  and that feature's values, across all rows. Spearman correlation is just Pearson correlation computed on the
+  <em>ranks</em> of the values rather than the raw values — it asks "do high-ranked predictions tend to come with
+  high-ranked feature values?" without caring about the exact shape of the relationship.
+</p>
+<p>
+  Do this for every feature and you get one number per feature: that feature's <em>exposure</em>. A feature the
+  model barely uses will have an exposure near 0. A feature the model leans on heavily — directly or through strong
+  correlation with what it does use — will have an exposure with large absolute value (close to 1 or −1).
+</p>
+
+<div class="formula">
+<code># exposure of one feature = Spearman correlation(predictions, feature)
+feature_exposures = [spearman_corr(predictions, df[f]) for f in feature_columns]
+
+max_feature_exposure = max(abs(e) for e in feature_exposures)
+</code>
+</div>
+
+<p>
+  The forum post reports a validation <code>max_feature_exposure</code> of <strong>0.2905</strong> for a reasonably
+  good model — treated as acceptable but improvable. There's also an aggregate version, the root-mean-square across
+  all features, which captures overall reliance rather than just the single worst offender:
+</p>
+
+<div class="formula">
+<code>rms_feature_exposure = sqrt(mean(e**2 for e in feature_exposures))
+</code>
+</div>
+
+<h2>The evidence</h2>
+<p>
+  This isn't just a theoretical concern. Testing across 80+ models (gradient-boosted trees and neural nets), the
+  author found a consistent inverse relationship: models with <em>lower</em> in-sample max feature exposure reliably
+  had <em>better</em> out-of-sample performance. Low exposure, measured before you ever see new data, predicted
+  robustness to regime change.
+</p>
+
+<h2>The catch</h2>
+<p>
+  You can't just chase exposure to zero. The post is explicit about this tension:
+  models with very low max feature exposure also tend to have <strong>low correlation</strong> with the target.
+  Some feature reliance is exactly where the predictive signal lives — a model with zero exposure to everything
+  has learned nothing. The goal isn't "minimize exposure," it's "get the best consistency-for-correlation tradeoff."
+  (That tradeoff — and a specific technique for improving it, <strong>feature neutralization</strong> — is the
+  subject of the next lesson.)
+</p>
+
+<div class="quiz" id="quiz1">
+  <div class="q">A model has excellent overall correlation with the target but a very high max feature exposure (0.85). What does this most likely predict?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">Strong, stable performance across every future era without exception</button>
+    <button class="choice" data-correct="true">Good performance now, but high risk of a sharp drop if that one feature's regime shifts</button>
+    <button class="choice" data-correct="false">The model is definitely overfit and has learned nothing real</button>
+    <button class="choice" data-correct="false">Feature exposure has no bearing on future performance</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">A model has feature exposures of 0.10, −0.40, 0.20 across its three features. What is its max feature exposure? (one number, e.g. 0.30)</div>
+  <input type="text" id="check1-input" placeholder="0.00">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<footer class="ask-agent">
+  Something unclear — the Spearman correlation, why non-stationarity causes this, or anything else? Ask your
+  teaching agent directly; that's what it's here for.
+</footer>
+
+<nav class="lesson-links">
+  <span>&larr; Start of course</span>
+  <span>Next: <a href="0002-correlation-and-spearman.html">Correlation & Spearman Rank Correlation</a> &rarr;</span>
+</nav>
+
+<script>
+(function() {
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = btn.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(b) {
+        if (b.getAttribute('data-correct') === 'true') b.classList.add('correct');
+        else if (b === btn) b.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. High exposure to one feature means the model\'s skill is concentrated, not diversified — fine until that feature\'s relationship with the target breaks.'
+        : 'Not quite. High exposure means reliance is concentrated in one feature — that\'s a fragility risk, not a guarantee of failure or of stability.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+
+  var input = document.getElementById('check1-input');
+  var btn = document.getElementById('check1-btn');
+  var fb = document.querySelector('#check1 .feedback');
+  function check() {
+    var val = parseFloat(input.value);
+    var fb2 = document.querySelector('#check1 .feedback');
+    if (isNaN(val)) {
+      fb2.textContent = 'Enter a number.';
+      fb2.className = 'feedback incorrect';
+      return;
+    }
+    var correct = Math.abs(val - 0.40) < 0.01;
+    fb2.textContent = correct
+      ? 'Correct — max exposure takes the absolute value of each exposure first, so −0.40 (|−0.40| = 0.40) beats 0.20.'
+      : 'Not quite — remember max feature exposure uses the absolute value of each exposure before taking the max. Try again.';
+    fb2.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn.addEventListener('click', check);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') check(); });
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,31 @@
+# Datasets (large, downloadable via download_data.py)
+datasets/
+
+# Cloned numerai example-scripts repo (has its own git history, not our research)
+example-scripts/
+
+# Data files anywhere
+*.parquet
+*.parquet.temp
+*.pkl
+*.csv
+*.feather
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Jupyter
+jupyter.log
+.jupyter/
+
+# Local machine-specific settings and installed skill libraries (tooling, not research)
+.claude/
+.agents/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

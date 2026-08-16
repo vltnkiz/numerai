@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 2 — Correlation & Spearman Rank Correlation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<div class="kicker">Lesson 2 of Feature Neutralization</div>
+<h1>Correlation & Spearman Rank Correlation</h1>
+<p class="lede">The one piece of math that <a href="0001-what-is-feature-exposure.html">Lesson 1</a> leaned on without explaining — worth nailing down before Lesson 3, where we build feature neutralization on top of it.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong> the exposure formula this refreshes comes straight from
+  <a href="https://forum.numer.ai/t/model-diagnostics-feature-exposure/899" target="_blank" rel="noopener">"Model Diagnostics: Feature Exposure"</a>
+  — this lesson just unpacks the statistics it assumes.
+</div>
+
+<h2>Correlation: "do two things move together?"</h2>
+<p>
+  Correlation is a single number between −1 and 1 that summarizes how two variables move relative to each other.
+</p>
+<ul>
+  <li><strong>+1</strong>: perfectly move together (one goes up, the other always goes up too)</li>
+  <li><strong>0</strong>: no consistent relationship</li>
+  <li><strong>−1</strong>: perfectly move opposite (one goes up, the other always goes down)</li>
+</ul>
+<p>
+  The standard version — <strong>Pearson correlation</strong> — is built from two ideas you may already have
+  intuitions for: <em>covariance</em> (do they move together, in raw units?) and <em>standard deviation</em>
+  (how much does each one move on its own?). Dividing the first by the second two rescales the answer so it always
+  lands between −1 and 1, regardless of the units either variable is measured in.
+</p>
+
+<div class="formula">
+<code>r = covariance(X, Y) / (std_dev(X) * std_dev(Y))</code>
+</div>
+
+<p>
+  You won't need to compute this by hand from raw covariance — every stats/ML library has a one-line call for it.
+  What matters is the intuition: correlation asks "as X goes up, does Y tend to go up (or down) <em>proportionally</em>?"
+</p>
+
+<h2>The catch: Pearson only sees straight lines</h2>
+<p>
+  Pearson correlation measures <strong>linear</strong> relationships. If Y always increases when X increases, but
+  not at a constant rate — say Y grows like X² — Pearson correlation will report something less than 1, even
+  though the relationship is perfectly predictable. Pearson is blind to relationships that curve.
+</p>
+<p>
+  A model's predictions and a feature rarely have a clean straight-line relationship. What we actually care about
+  for feature exposure is weaker but more general: <em>does a higher feature value tend to go with a higher
+  prediction, regardless of the exact shape of that trend?</em> That's a <strong>monotonic</strong> relationship —
+  consistently increasing (or decreasing), even if not at a constant rate. This is exactly what Spearman correlation measures.
+</p>
+
+<h2>Spearman: correlation on ranks, not values</h2>
+<p>
+  Spearman rank correlation has a strikingly simple definition: <strong>replace every value with its rank</strong>
+  (1st smallest, 2nd smallest, …), then compute ordinary Pearson correlation on those ranks instead of the raw values.
+</p>
+<p>
+  Because ranks only encode order, not magnitude, Spearman correlation no longer cares whether the relationship is a
+  straight line, a curve, or any other shape — only whether it's <em>consistently increasing or decreasing</em>.
+  That's exactly the property Numerai's feature exposure calculation wants: does the model's prediction rank move
+  consistently with a feature's rank, however that trend bends?
+</p>
+
+<h3>Worked example</h3>
+<p>Five rows. Prediction and one feature value per row:</p>
+<div class="formula">
+<code>row:         A     B     C     D     E
+prediction:  0.10  0.90  0.30  0.70  0.50
+feature:     1     50    2     40    3</code>
+</div>
+<p>Convert each column to ranks (1 = smallest):</p>
+<div class="formula">
+<code>row:            A   B   C   D   E
+prediction rank: 1   5   2   4   3
+feature rank:     1   5   2   4   3</code>
+</div>
+<p>
+  The ranks are identical between the two columns — every time prediction rank goes up, feature rank goes up by
+  exactly the same amount. Spearman correlation here is <strong>1.0</strong>, a perfect monotonic relationship —
+  even though the raw feature values (1, 50, 2, 40, 3) don't increase at anything like a constant rate relative to
+  the predictions (0.10, 0.90, 0.30, 0.70, 0.50). Pearson on the raw values would report something high but
+  not exactly 1; Spearman, working on ranks alone, reports exactly 1, because rank order is all it looks at.
+</p>
+
+<div class="quiz" id="quiz1">
+  <div class="q">Why does Numerai's feature exposure calculation use Spearman correlation rather than Pearson correlation?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">Spearman correlation is always a larger number than Pearson</button>
+    <button class="choice" data-correct="true">Spearman catches monotonic reliance even when the relationship isn't a straight line</button>
+    <button class="choice" data-correct="false">Spearman correlation works without needing a prediction column</button>
+    <button class="choice" data-correct="false">Pearson correlation cannot be computed on model predictions</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">
+    Ranks for prediction: [1, 2, 3, 4]. Ranks for a feature, same rows: [4, 3, 2, 1] (perfectly reversed order).
+    What is the Spearman rank correlation? (one number, e.g. 0.50)
+  </div>
+  <input type="text" id="check1-input" placeholder="0.00">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<p>
+  With that in hand, "feature exposure" from Lesson 1 should now read as a fully concrete recipe: rank the
+  predictions, rank each feature, correlate the two rank lists. Lesson 3 builds on this same idea — but instead of
+  just <em>measuring</em> reliance on a feature, it <em>removes</em> it.
+</p>
+
+<footer class="ask-agent">
+  If covariance, standard deviation, or the ranking step still feels shaky, ask your teaching agent to walk through
+  another worked example — better to ask now than to carry a shaky foundation into neutralization's regression math.
+</footer>
+
+<nav class="lesson-links">
+  <span>&larr; <a href="0001-what-is-feature-exposure.html">Lesson 1: What Is Feature Exposure?</a></span>
+  <span>Next: <a href="0003-feature-neutralization.html">Lesson 3: Feature Neutralization</a> &rarr;</span>
+</nav>
+
+<script>
+(function() {
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = btn.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(b) {
+        if (b.getAttribute('data-correct') === 'true') b.classList.add('correct');
+        else if (b === btn) b.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. Predictions vs. a feature rarely form a straight line, but Spearman still catches consistent up-or-down reliance regardless of shape.'
+        : 'Not quite. The key reason is that Spearman catches monotonic (consistently increasing/decreasing) relationships even when they curve — Pearson would understate those.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+
+  var input = document.getElementById('check1-input');
+  var btn = document.getElementById('check1-btn');
+  function check() {
+    var val = parseFloat(input.value);
+    var fb = document.querySelector('#check1 .feedback');
+    if (isNaN(val)) {
+      fb.textContent = 'Enter a number.';
+      fb.className = 'feedback incorrect';
+      return;
+    }
+    var correct = Math.abs(val - (-1.0)) < 0.01;
+    fb.textContent = correct
+      ? 'Correct — perfectly reversed rank order gives Spearman correlation of exactly −1, the mirror image of the perfectly-matched +1 case above.'
+      : 'Not quite — think about the two extremes: identical rank order gives +1 (worked example above), so perfectly reversed rank order gives the opposite extreme. Try again.';
+    fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn.addEventListener('click', check);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') check(); });
+})();
+</script>
+
+</body>
+</html>

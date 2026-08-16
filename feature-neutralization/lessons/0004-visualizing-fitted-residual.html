@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 4 — Visualizing Fitted vs Residual</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .viz-root {
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --axis: #9c968a;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --axis: #6b6b63;
+    }
+  }
+  .chart-wrap { margin: 1.5rem 0; }
+  svg.chart { width: 100%; height: auto; display: block; }
+  .axis-line { stroke: var(--axis); stroke-width: 1; }
+  .grid-line { stroke: var(--axis); stroke-width: 1; opacity: 0.25; }
+  .tick-label { font-size: 11px; fill: var(--muted); font-family: inherit; }
+  .fit-line { stroke: var(--series-1); stroke-width: 2; opacity: 0.55; }
+  .pt-orig { fill: var(--series-1); opacity: 0.45; }
+  .pt-neut { fill: var(--series-2); }
+  .pt-label { font-size: 11px; fill: var(--ink); font-family: inherit; }
+  .legend { display: flex; gap: 1.5rem; font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; flex-wrap: wrap; }
+  .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.4rem; vertical-align: middle; }
+  .legend .sw1 { background: var(--series-1); opacity: 0.5; }
+  .legend .sw2 { background: var(--series-2); }
+  .controls { margin: 1.25rem 0; padding: 1rem 1.25rem; background: var(--code-bg); border-radius: 4px; }
+  .controls label { display: block; font-size: 0.9rem; color: var(--muted); margin-bottom: 0.4rem; }
+  .controls input[type="range"] { width: 100%; }
+  .readout { display: flex; justify-content: space-between; margin-top: 0.6rem; font-size: 0.95rem; }
+  .readout .val { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body class="viz-root">
+
+<div class="kicker">Lesson 4 of Feature Neutralization</div>
+<h1>Seeing the Split</h1>
+<p class="lede"><a href="0003-feature-neutralization.html">Lesson 3</a> gave you the algebra: prediction = fitted + residual, and neutralized = prediction − proportion × fitted. This lesson turns that into a picture you can drag, using the same five rows.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong>
+  <a href="https://forum.numer.ai/t/an-introduction-to-feature-neutralization-exposure/4955" target="_blank" rel="noopener">"An Introduction to Feature Neutralization & Exposure"</a>
+  — this lesson visualizes the same least-squares procedure that post walks through numerically.
+</div>
+
+<h2>The five rows, plotted</h2>
+<p>
+  Each point is one row: feature on the x-axis, prediction on the y-axis. The line is the best-fit line from Lesson
+  3 — the one that minimizes total squared distance to the points. For each point, the <strong>fitted</strong> value
+  is where it lands <em>on</em> the line; the <strong>residual</strong> is the gap between the point and the line.
+</p>
+
+<div class="chart-wrap">
+  <svg class="chart" viewBox="0 0 480 300" role="img" aria-label="Scatter plot of prediction vs feature with fitted line and residual segments">
+    <line class="grid-line" x1="40" y1="240" x2="440" y2="240"/>
+    <line class="axis-line" x1="40" y1="20" x2="40" y2="260"/>
+    <line class="axis-line" x1="40" y1="260" x2="440" y2="260"/>
+    <text class="tick-label" x="40" y="278">0</text>
+    <text class="tick-label" x="112" y="278">10</text>
+    <text class="tick-label" x="184" y="278">20</text>
+    <text class="tick-label" x="256" y="278">30</text>
+    <text class="tick-label" x="328" y="278">40</text>
+    <text class="tick-label" x="400" y="278">50</text>
+    <text class="tick-label" x="440" y="292">feature</text>
+    <text class="tick-label" x="10" y="244">0</text>
+    <text class="tick-label" x="4" y="132">0.5</text>
+    <text class="tick-label" x="10" y="24">1</text>
+    <line class="fit-line" id="fitLine" x1="0" y1="0" x2="0" y2="0"/>
+    <g id="residuals"></g>
+    <g id="origPoints"></g>
+    <g id="neutPoints"></g>
+  </svg>
+  <div class="legend">
+    <span><span class="swatch sw1"></span>prediction (original) &amp; fitted line</span>
+    <span><span class="swatch sw2"></span>neutralized prediction</span>
+  </div>
+</div>
+
+<div class="controls">
+  <label for="propSlider">proportion (how much of the fitted part to subtract)</label>
+  <input type="range" id="propSlider" min="0" max="1" step="0.05" value="0">
+  <div class="readout">
+    <span>proportion = <span class="val" id="propVal">0.00</span></span>
+    <span>correlation of neutralized prediction with feature: <span class="val" id="corrVal">—</span></span>
+  </div>
+</div>
+
+<p>
+  Drag the slider. At <code>proportion = 0</code> the orange points sit exactly on top of the blue ones — nothing
+  has been removed. As <code>proportion</code> rises, each orange point slides from its original position toward
+  its residual — straight down toward (or up from) the fitted line. By <code>proportion = 1</code>, every orange
+  point <em>is</em> its residual, and the correlation readout should sit near zero: the systematic left-to-right
+  climb is gone, leaving a flat, uncorrelated scatter.
+</p>
+
+<h2>Why removing the fitted part actually kills the exposure</h2>
+<p>
+  This isn't a coincidence of this particular data — it's a guarantee of how least squares works. The fitted line
+  is <em>defined</em> as the one that minimizes squared residual distance, and the point that minimizes that
+  distance is always the one where the leftover gap is <strong>perpendicular</strong> to the feature direction.
+  A residual that's perpendicular to the feature has, by construction, zero correlation with it. So:
+</p>
+<ul>
+  <li><strong>fitted</strong> = the entire part of the prediction that a straight line through the feature can
+    explain — this is exactly what "feature exposure" (Lessons 1–2) is measuring</li>
+  <li><strong>residual</strong> = everything left over, which is mathematically guaranteed to have zero
+    (Pearson) correlation with the feature</li>
+</ul>
+<p>
+  Subtracting the fitted part isn't a heuristic that happens to reduce exposure — it's the one quantity whose
+  removal drives that specific relationship to exactly zero, while leaving everything else in the prediction
+  untouched.
+</p>
+<div class="callout">
+  <strong>One honest caveat:</strong> exposure is measured with Spearman (rank) correlation, but the regression
+  here is ordinary least squares, which targets Pearson correlation. Removing the OLS-fitted part drives Pearson
+  correlation to exactly zero and, in practice, drags the rank-based Spearman exposure down with it too — but the
+  two aren't algebraically identical. That's why real diagnostics still re-check Spearman exposure on the
+  neutralized predictions afterward rather than assuming zero.
+</div>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">
+    Row B has <code>prediction_B = 0.90</code> and <code>fitted_B ≈ 0.870</code>. At full neutralization
+    (<code>proportion = 1</code>), what is <code>neutralized_B</code>? (round to 3 decimals, e.g. 0.123)
+  </div>
+  <input type="text" id="check1-input" placeholder="0.000">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<div class="quiz" id="quiz1">
+  <div class="q">As you drag proportion from 0 toward 1 in the chart above, why do the orange points stop trending upward with the feature?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">The slider is rescaling the y-axis, which flattens the visual trend</button>
+    <button class="choice" data-correct="true">What's left after subtracting the fitted part is, by the definition of least squares, uncorrelated with the feature</button>
+    <button class="choice" data-correct="false">Removing the fitted part randomly shuffles which row gets which prediction</button>
+    <button class="choice" data-correct="false">The feature values themselves are being changed by the neutralization formula</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<footer class="ask-agent">
+  If the "residual is perpendicular, therefore uncorrelated" claim still feels like a leap, ask your teaching agent
+  to walk through it with vectors instead of scatter points — same idea, different picture.
+</footer>
+
+<nav class="lesson-links">
+  <span>&larr; <a href="0003-feature-neutralization.html">Lesson 3: Feature Neutralization</a></span>
+  <span>Next: Implementing Neutralization in Code &rarr; <em>(coming next session)</em></span>
+</nav>
+
+<script>
+(function() {
+  var feature = [1, 50, 2, 40, 3];
+  var prediction = [0.10, 0.90, 0.30, 0.70, 0.50];
+  var fitted = [0.282, 0.870, 0.294, 0.750, 0.306];
+  var labels = ['A', 'B', 'C', 'D', 'E'];
+
+  // pixel scales: x in [40,440] maps feature [0,55]; y in [20,260] maps value [1.05,-0.25] (inverted)
+  function px(f) { return 40 + (f / 55) * 400; }
+  function py(v) { return 260 - ((v - (-0.25)) / (1.05 - (-0.25))) * 240; }
+
+  var betaSlope = 0.0120, meanF = 19.2, meanP = 0.50;
+  function fitAt(f) { return meanP + betaSlope * (f - meanF); }
+
+  var fitLine = document.getElementById('fitLine');
+  fitLine.setAttribute('x1', px(0));
+  fitLine.setAttribute('y1', py(fitAt(0)));
+  fitLine.setAttribute('x2', px(55));
+  fitLine.setAttribute('y2', py(fitAt(55)));
+
+  var origGroup = document.getElementById('origPoints');
+  feature.forEach(function(f, i) {
+    var c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('cx', px(f));
+    c.setAttribute('cy', py(prediction[i]));
+    c.setAttribute('r', 5);
+    c.setAttribute('class', 'pt-orig');
+    origGroup.appendChild(c);
+  });
+
+  var neutGroup = document.getElementById('neutPoints');
+  var residGroup = document.getElementById('residuals');
+  var neutCircles = [], neutLabels = [], residLines = [];
+  feature.forEach(function(f, i) {
+    var c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('r', 5);
+    c.setAttribute('class', 'pt-neut');
+    neutGroup.appendChild(c);
+    neutCircles.push(c);
+
+    var t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('class', 'pt-label');
+    t.textContent = labels[i];
+    neutGroup.appendChild(t);
+    neutLabels.push(t);
+
+    var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('class', 'fit-line');
+    line.setAttribute('stroke-dasharray', '3,3');
+    line.setAttribute('opacity', '0');
+    residGroup.appendChild(line);
+    residLines.push(line);
+  });
+
+  function corr(xs, ys) {
+    var n = xs.length;
+    var mx = xs.reduce(function(a, b) { return a + b; }, 0) / n;
+    var my = ys.reduce(function(a, b) { return a + b; }, 0) / n;
+    var num = 0, dx2 = 0, dy2 = 0;
+    for (var i = 0; i < n; i++) {
+      var dx = xs[i] - mx, dy = ys[i] - my;
+      num += dx * dy; dx2 += dx * dx; dy2 += dy * dy;
+    }
+    return num / Math.sqrt(dx2 * dy2);
+  }
+
+  var slider = document.getElementById('propSlider');
+  var propVal = document.getElementById('propVal');
+  var corrVal = document.getElementById('corrVal');
+
+  function render() {
+    var p = parseFloat(slider.value);
+    propVal.textContent = p.toFixed(2);
+    var neutValues = [];
+    feature.forEach(function(f, i) {
+      var neut = prediction[i] - p * fitted[i];
+      neutValues.push(neut);
+      var cx = px(f), cy = py(neut);
+      neutCircles[i].setAttribute('cx', cx);
+      neutCircles[i].setAttribute('cy', cy);
+      neutLabels[i].setAttribute('x', cx + 7);
+      neutLabels[i].setAttribute('y', cy - 7);
+      residLines[i].setAttribute('x1', cx);
+      residLines[i].setAttribute('y1', py(prediction[i]));
+      residLines[i].setAttribute('x2', cx);
+      residLines[i].setAttribute('y2', cy);
+      residLines[i].setAttribute('opacity', p > 0 ? 0.35 : 0);
+    });
+    var r = corr(feature, neutValues);
+    corrVal.textContent = (isNaN(r) ? '0.000' : r.toFixed(3));
+  }
+  slider.addEventListener('input', render);
+  render();
+
+  // numeric check
+  var input = document.getElementById('check1-input');
+  var btn = document.getElementById('check1-btn');
+  function check() {
+    var val = parseFloat(input.value);
+    var fb = document.querySelector('#check1 .feedback');
+    if (isNaN(val)) {
+      fb.textContent = 'Enter a number.';
+      fb.className = 'feedback incorrect';
+      return;
+    }
+    var expected = 0.90 - 1 * 0.870;
+    var correct = Math.abs(val - expected) < 0.01;
+    fb.textContent = correct
+      ? 'Correct — 0.90 − 1 × 0.870 = 0.030. This is row B\'s residual: almost the entire prediction was explained by the feature, so barely anything is left once you subtract the fitted part.'
+      : 'Not quite — neutralized = prediction − proportion × fitted. Plug in prediction = 0.90, proportion = 1, fitted = 0.870.';
+    fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn.addEventListener('click', check);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') check(); });
+
+  // quiz
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(b) {
+    b.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = b.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(bb) {
+        if (bb.getAttribute('data-correct') === 'true') bb.classList.add('correct');
+        else if (bb === b) bb.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. Least squares defines the fitted line so the residual is perpendicular to the feature direction — and a perpendicular residual has zero correlation with it, by construction.'
+        : 'Not quite. Nothing about the feature values or the row assignment changes — only the y-position of each point moves, from its original prediction toward its residual.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

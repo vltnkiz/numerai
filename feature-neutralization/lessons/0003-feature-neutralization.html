@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 3 — Feature Neutralization</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<div class="kicker">Lesson 3 of Feature Neutralization</div>
+<h1>Feature Neutralization</h1>
+<p class="lede"><a href="0001-what-is-feature-exposure.html">Lesson 1</a> taught you to <em>measure</em> how much a prediction leans on a feature. <a href="0002-correlation-and-spearman.html">Lesson 2</a> taught you the tool that measures it. This lesson teaches the fix: how to actually <em>remove</em> that lean, on purpose, by a controlled amount.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong>
+  <a href="https://forum.numer.ai/t/an-introduction-to-feature-neutralization-exposure/4955" target="_blank" rel="noopener">"An Introduction to Feature Neutralization & Exposure"</a>
+  — this lesson walks through the same procedure with a smaller, hand-computable example.
+</div>
+
+<h2>The idea: split predictions into "explained by the feature" and "leftover"</h2>
+<p>
+  Take your model's predictions and one feature. Some part of the predictions can be written as a straight-line
+  function of that feature — call this the <strong>fitted</strong> part. Whatever is left over — the part the
+  feature can't explain — is the <strong>residual</strong>.
+</p>
+<div class="formula">
+<code>prediction = fitted (explained by the feature) + residual (everything else)</code>
+</div>
+<p>
+  Feature exposure, from Lesson 1, measures how big the "fitted" part is relative to the whole. Neutralization's
+  move is blunt and effective: <strong>throw away some or all of the fitted part, and keep the residual.</strong>
+  Whatever was riding on the feature is gone; whatever the model knew independent of that feature survives.
+</p>
+
+<h2>Finding the "fitted" part: linear regression</h2>
+<p>
+  How do you find the best straight-line explanation of the predictions using the feature? This is exactly what
+  <strong>linear regression</strong> does: it finds the line <code>fitted = β × feature</code> that stays as close
+  as possible to the actual predictions — specifically, the line that minimizes the total squared distance between
+  the fitted values and the real predictions (this is why it's called <em>least squares</em>).
+</p>
+<p>
+  Geometrically, think of your predictions as an arrow (a vector) and the feature as a different arrow. Regression
+  finds the point on the feature's arrow that sits closest to the tip of the predictions' arrow — that's a
+  <strong>projection</strong>. The leftover gap between that closest point and the real prediction is the residual,
+  and it always points in a direction perpendicular to the feature. That perpendicularity is precisely what "no
+  more relationship left to explain" looks like.
+</p>
+<p>
+  With one feature, the best-fit slope has a simple formula you already have the pieces for from Lesson 2:
+</p>
+<div class="formula">
+<code>β = covariance(feature, prediction) / variance(feature)</code>
+</div>
+<p>
+  With many features at once — the real Numerai case — the same idea holds, but solving for all the β's
+  simultaneously (accounting for features that overlap with each other) requires a matrix tool called the
+  <strong>Moore-Penrose pseudo-inverse</strong>. You don't need to hand-compute it; every linear algebra library has
+  it in one call. What matters is that it's doing the same job as the formula above, just for many features that
+  may be correlated with each other, all at once.
+</p>
+
+<h2>The <code>proportion</code> knob</h2>
+<p>
+  Removing 100% of the fitted part is not always what you want — the feature may carry some real, useful signal
+  alongside the risky over-reliance. Neutralization introduces a <strong>proportion</strong> parameter between 0
+  and 1 that controls how much of the fitted part to subtract:
+</p>
+<div class="formula">
+<code>neutralized = prediction − proportion × fitted</code>
+</div>
+<ul>
+  <li><strong>proportion = 0</strong>: subtract nothing — predictions unchanged, full feature exposure kept</li>
+  <li><strong>proportion = 1</strong>: subtract the entire fitted part — feature exposure driven to (near) zero</li>
+  <li><strong>0 &lt; proportion &lt; 1</strong>: partially reduce exposure, trading away some correlation with the
+    target in exchange for more robustness if that feature's relationship breaks down in a future era</li>
+</ul>
+<p>
+  This is the tradeoff your mission is really about: neutralizing too little leaves you exposed to regime change;
+  neutralizing too much throws away real signal along with the risky part. There's no universally correct
+  <code>proportion</code> — it's a judgment call you make by looking at exposure diagnostics, which is exactly
+  what a later lesson will practice.
+</p>
+
+<h3>Worked example</h3>
+<p>Same five rows as Lesson 2's worked example. Prediction and one feature, plus the mean of each:</p>
+<div class="formula">
+<code>row:         A     B     C     D     E      mean
+prediction:  0.10  0.90  0.30  0.70  0.50    0.50
+feature:     1     50    2     40    3       19.2</code>
+</div>
+<p>Step 1 — find β (slope) using the formula above. Numerically, for this data:</p>
+<div class="formula">
+<code>covariance(feature, prediction) ≈ 5.44
+variance(feature)                ≈ 454.2
+β ≈ 5.44 / 454.2 ≈ 0.0120</code>
+</div>
+<p>Step 2 — compute the fitted value for row A (feature = 1), using <code>fitted = mean(prediction) + β × (feature − mean(feature))</code>:</p>
+<div class="formula">
+<code>fitted_A = 0.50 + 0.0120 × (1 − 19.2) = 0.50 + 0.0120 × (−18.2) ≈ 0.282</code>
+</div>
+<p>Step 3 — neutralize row A's prediction with <code>proportion = 1</code> (full neutralization):</p>
+<div class="formula">
+<code>neutralized_A = prediction_A − 1 × fitted_A = 0.10 − 0.282 ≈ −0.182</code>
+</div>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">
+    Using the same row A (<code>prediction_A = 0.10</code>, <code>fitted_A ≈ 0.282</code>), what is
+    <code>neutralized_A</code> if <code>proportion = 0.5</code> instead of 1? (round to 3 decimals, e.g. 0.123)
+  </div>
+  <input type="text" id="check1-input" placeholder="0.000">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<div class="quiz" id="quiz1">
+  <div class="q">A colleague sets proportion = 1 on every feature with any measurable exposure. What's the main risk?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">The model will overfit to the training era even more than before</button>
+    <button class="choice" data-correct="false">Feature exposure will increase instead of decrease</button>
+    <button class="choice" data-correct="true">Real predictive signal correlated with those features gets removed along with the risky part</button>
+    <button class="choice" data-correct="false">Spearman correlation can no longer be computed on the result</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<p>
+  With this, the full loop from Lesson 1 closes: measure exposure (Spearman), understand why it predicts fragility,
+  and now — reduce it by a controlled amount via regression and a <code>proportion</code> knob. The next step is
+  putting this into code against a real prediction/feature matrix, where the pseudo-inverse handles many features
+  at once.
+</p>
+
+<footer class="ask-agent">
+  If the projection/residual picture or the β formula still feels shaky, ask your teaching agent to draw it out
+  differently or work through a second numeric example — this is the mechanical core the rest of the course builds on.
+</footer>
+
+<nav class="lesson-links">
+  <span>&larr; <a href="0002-correlation-and-spearman.html">Lesson 2: Correlation & Spearman</a></span>
+  <span>Next: <a href="0004-visualizing-fitted-residual.html">Lesson 4: Visualizing Fitted vs Residual</a></span>
+</nav>
+
+<script>
+(function() {
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = btn.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(b) {
+        if (b.getAttribute('data-correct') === 'true') b.classList.add('correct');
+        else if (b === btn) b.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. The fitted part isn\'t purely "risk" — it can carry genuine signal too. proportion = 1 removes all of it, signal included.'
+        : 'Not quite. Neutralization only ever removes the fitted (feature-explained) part — think about what else might be riding along inside that fitted part besides the risky over-reliance.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+
+  var input = document.getElementById('check1-input');
+  var btn = document.getElementById('check1-btn');
+  function check() {
+    var val = parseFloat(input.value);
+    var fb = document.querySelector('#check1 .feedback');
+    if (isNaN(val)) {
+      fb.textContent = 'Enter a number.';
+      fb.className = 'feedback incorrect';
+      return;
+    }
+    var expected = 0.10 - 0.5 * 0.282;
+    var correct = Math.abs(val - expected) < 0.01;
+    fb.textContent = correct
+      ? 'Correct — with proportion = 0.5 you only subtract half the fitted value: 0.10 − 0.5 × 0.282 ≈ −0.041. Halfway between the untouched prediction (0.10) and the fully-neutralized one (−0.182).'
+      : 'Not quite — the formula is neutralized = prediction − proportion × fitted. Plug in prediction = 0.10, proportion = 0.5, fitted ≈ 0.282, and try again.';
+    fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn.addEventListener('click', check);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') check(); });
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 5 — Implementing Neutralization in Code</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .code-block {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1em 1.2em;
+    overflow-x: auto;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    margin: 1.2em 0;
+    white-space: pre;
+  }
+  .code-block .cm { color: var(--muted); }
+  table.worked { border-collapse: collapse; margin: 1.2em 0; font-size: 0.9rem; width: 100%; }
+  table.worked th, table.worked td {
+    border: 1px solid var(--rule); padding: 0.4em 0.7em; text-align: right;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85rem;
+  }
+  table.worked th:first-child, table.worked td:first-child { text-align: left; font-family: inherit; }
+  .fill-check input[type="text"] { width: 10em; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 5 of Feature Neutralization</div>
+<h1>From One Feature to All of Them</h1>
+<p class="lede"><a href="0003-feature-neutralization.html">Lesson 3</a> gave you the algebra for one feature. <a href="0004-visualizing-fitted-residual.html">Lesson 4</a> showed you the picture. This lesson closes the loop: the actual code Numerai's own tools use to neutralize predictions against an entire feature matrix at once.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong>
+  <a href="https://github.com/numerai/numerai-tools/blob/master/numerai_tools/scoring.py" target="_blank" rel="noopener">numerai-tools <code>scoring.py</code> — the <code>neutralize</code> function</a>,
+  from the <a href="https://github.com/numerai/numerai-tools" target="_blank" rel="noopener">official numerai-tools repository</a>. Every line below is quoted verbatim from that file.
+</div>
+
+<h2>From a scalar β to a vector of β's</h2>
+<p>
+  In Lesson 3, one feature meant one slope: <code>β = covariance(feature, prediction) / variance(feature)</code>, a
+  single number. With many features at once — the real situation, since a Numerai model has hundreds — you can't
+  just repeat that formula feature-by-feature. Features are correlated with <em>each other</em>, so removing feature
+  1's fitted part can accidentally reintroduce exposure to feature 2. You need to solve for every β
+  <strong>simultaneously</strong>, accounting for all those overlaps at once.
+</p>
+<p>
+  Stack the features as columns of a matrix <code>X</code> (rows = stocks/rows, columns = features) and the problem
+  becomes: find the vector <code>β</code> that makes <code>Xβ</code> the closest possible match to the prediction
+  vector, in the same least-squares sense as before. The closed-form answer is
+</p>
+<div class="formula">
+<code>β = pinv(X) · prediction</code>
+</div>
+<p>
+  where <code>pinv(X)</code> is the <strong>Moore-Penrose pseudo-inverse</strong> — the matrix generalization of
+  "divide by variance" that Lesson 3 flagged as coming later. It exists even when <code>X</code> isn't square or has
+  correlated columns, which real feature matrices always do. <code>fitted = Xβ</code> is still the projection onto
+  the space spanned by all the features together, and the residual is still perpendicular to <em>all</em> of
+  them at once — not just each one individually, but the whole space they span. That's the multi-feature version of
+  the perpendicularity fact from Lesson 4.
+</p>
+
+<h2>Reading the real function</h2>
+<p>
+  In practice, nobody calls <code>pinv</code> directly — <code>np.linalg.lstsq</code> solves the same least-squares
+  problem more numerically stably, without ever forming the pseudo-inverse matrix explicitly. Here's the actual
+  function, with the parts to focus on called out below it:
+</p>
+<div class="code-block">def neutralize(
+    df: pd.DataFrame,
+    neutralizers: pd.DataFrame,
+    proportion: float = 1.0,
+) -> pd.DataFrame:
+    df_arr = df.values
+    neutralizer_arr = neutralizers.values
+    neutralizer_arr = np.hstack(
+        <span class="cm"># add a column of 1s to the neutralizer array</span>
+        (neutralizer_arr, np.array([1] * len(neutralizer_arr)).reshape(-1, 1))
+    )
+    least_squares = np.linalg.lstsq(neutralizer_arr, df_arr, rcond=1e-6)[0]
+    adjustments = proportion * neutralizer_arr.dot(least_squares)
+    neutral = df_arr - adjustments
+    return pd.DataFrame(neutral, index=df.index, columns=df.columns)</div>
+<ul>
+  <li><strong><code>neutralizer_arr</code></strong> is <code>X</code> — one column per feature, one row per stock.
+    <code>df_arr</code> is the prediction column(s) you're neutralizing.</li>
+  <li><strong>the <code>hstack</code> of a column of 1s</strong> is doing the job that "mean-centering" did by hand
+    in Lesson 3's <code>fitted = mean(prediction) + β × (feature − mean(feature))</code> formula. Instead of
+    centering the data first, the code gives the regression an intercept term (a constant feature that's always 1)
+    and lets it absorb the mean itself. Same result, less bookkeeping.</li>
+  <li><strong><code>np.linalg.lstsq(neutralizer_arr, df_arr, rcond=1e-6)[0]</code></strong> is the line doing the
+    pseudo-inverse's job: it solves for every β at once. <code>rcond=1e-6</code> is a numerical tolerance — it tells
+    the solver to treat near-zero variance directions (e.g. two nearly-duplicate features) as noise rather than
+    blowing up trying to divide by them.</li>
+  <li><strong><code>adjustments = proportion * neutralizer_arr.dot(least_squares)</code></strong> is
+    <code>proportion × fitted</code> from Lesson 3's formula — <code>neutralizer_arr.dot(least_squares)</code> is
+    exactly <code>Xβ</code>, i.e. the fitted part, for <em>every</em> feature combined into one number per row.</li>
+  <li><strong><code>neutral = df_arr - adjustments</code></strong> is <code>prediction − proportion × fitted</code>,
+    unchanged from Lesson 3 — the only thing that got more complex was computing <code>fitted</code>.</li>
+</ul>
+
+<h2>Worked example: two features, one regression</h2>
+<p>
+  Same five rows as before, now with a second feature added. Watch what a <em>single</em> regression against both
+  features does to exposure on both simultaneously:
+</p>
+<table class="worked">
+  <tr><th>row</th><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th></tr>
+  <tr><th>prediction</th><td>0.10</td><td>0.90</td><td>0.30</td><td>0.70</td><td>0.50</td></tr>
+  <tr><th>feature 1</th><td>1</td><td>50</td><td>2</td><td>40</td><td>3</td></tr>
+  <tr><th>feature 2</th><td>5</td><td>10</td><td>45</td><td>8</td><td>40</td></tr>
+  <tr><th>fitted (β₁f₁+β₂f₂+intercept)</th><td>0.108</td><td>0.886</td><td>0.403</td><td>0.721</td><td>0.383</td></tr>
+</table>
+<p>
+  That <code>fitted</code> row comes from one call to <code>np.linalg.lstsq</code> against both feature columns at
+  once — not two separate single-feature regressions. Subtracting it at <code>proportion = 1</code> drives the
+  neutralized predictions' correlation with <strong>both</strong> feature 1 and feature 2 down to essentially zero in
+  one step — no need to neutralize one feature, re-check, then neutralize the next.
+</p>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">
+    Row C has <code>prediction_C = 0.30</code> and <code>fitted_C ≈ 0.403</code>. At <code>proportion = 1</code>,
+    what is <code>neutralized_C</code>? (round to 3 decimals, e.g. -0.123)
+  </div>
+  <input type="text" id="check1-input" placeholder="0.000">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<div class="numeric-check fill-check" id="check2">
+  <div class="prompt">
+    In the code above, which single numpy function call replaces the need to ever compute
+    <code>pinv(X)</code> explicitly?
+  </div>
+  <input type="text" id="check2-input" placeholder="np.linalg.____">
+  <button id="check2-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<div class="quiz" id="quiz1">
+  <div class="q">Why does one <code>lstsq</code> call against both features together do something a single-feature regression on feature 1, followed by another on feature 2, can't guarantee?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">It runs faster, which is the only difference</button>
+    <button class="choice" data-correct="true">It accounts for the correlation between feature 1 and feature 2, so removing exposure to one doesn't silently reintroduce exposure to the other</button>
+    <button class="choice" data-correct="false">It produces a different proportion value automatically for each feature</button>
+    <button class="choice" data-correct="false">Doing them separately is mathematically identical, so there's no real reason</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<div class="quiz" id="quiz2">
+  <div class="q">What role does the column of 1s appended via <code>np.hstack</code> play?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">It's a bug workaround with no mathematical meaning</button>
+    <button class="choice" data-correct="false">It doubles the weight given to the first feature</button>
+    <button class="choice" data-correct="true">It gives the regression an intercept term, so it doesn't need the data mean-centered by hand first</button>
+    <button class="choice" data-correct="false">It normalizes every feature to have the same variance</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<p>
+  This is the whole pipeline, end to end: get your model's predictions and your full feature matrix into two arrays,
+  call <code>neutralize(predictions_df, features_df, proportion)</code>, and every feature's exposure drops together
+  — by exactly as much as your chosen <code>proportion</code> dictates.
+</p>
+
+<footer class="ask-agent">
+  If the jump from a single β to a whole vector of them feels too fast, ask your teaching agent to walk the
+  two-feature worked example through by hand — showing how one regression's β₁ and β₂ come out different from what
+  you'd get regressing on each feature alone, because each accounts for the other.
+</footer>
+
+<nav class="lesson-links">
+  <span>&larr; <a href="0004-visualizing-fitted-residual.html">Lesson 4: Visualizing Fitted vs Residual</a></span>
+  <span>Next: <a href="0006-matrix-multiplication-and-inverse.html">Lesson 6: Matrix Multiplication and the Inverse</a></span>
+</nav>
+
+<script>
+(function() {
+  var input1 = document.getElementById('check1-input');
+  var btn1 = document.getElementById('check1-btn');
+  function check1() {
+    var val = parseFloat(input1.value);
+    var fb = document.querySelector('#check1 .feedback');
+    if (isNaN(val)) {
+      fb.textContent = 'Enter a number.';
+      fb.className = 'feedback incorrect';
+      return;
+    }
+    var expected = 0.30 - 1 * 0.403;
+    var correct = Math.abs(val - expected) < 0.01;
+    fb.textContent = correct
+      ? 'Correct — 0.30 − 1 × 0.403 = −0.103. Same formula as Lesson 3, just with a fitted value that now accounts for two features at once.'
+      : 'Not quite — neutralized = prediction − proportion × fitted. Plug in prediction = 0.30, proportion = 1, fitted = 0.403.';
+    fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn1.addEventListener('click', check1);
+  input1.addEventListener('keydown', function(e) { if (e.key === 'Enter') check1(); });
+
+  var input2 = document.getElementById('check2-input');
+  var btn2 = document.getElementById('check2-btn');
+  function check2() {
+    var val = input2.value.trim().toLowerCase().replace(/^np\.linalg\./, '');
+    var fb = document.querySelector('#check2 .feedback');
+    var correct = val === 'lstsq' || val === 'lstsq()';
+    fb.textContent = correct
+      ? 'Correct — np.linalg.lstsq. It solves the same least-squares problem as pinv(X)·prediction, but more numerically stably, without ever forming the pseudo-inverse matrix explicitly.'
+      : 'Not quite — look at the line that produces the variable named "least_squares" in the code above.';
+    fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn2.addEventListener('click', check2);
+  input2.addEventListener('keydown', function(e) { if (e.key === 'Enter') check2(); });
+
+  var quizMessages = {
+    quiz1: {
+      correct: 'Right. lstsq solves for every β jointly, so it already "knows" feature 1 and feature 2 overlap — the β it assigns to each one is adjusted for that overlap. Two separate single-feature regressions have no way to know about each other.',
+      incorrect: 'Not quite. The key difference isn\'t speed or proportion — it\'s that a joint regression accounts for correlation between the features, which a sequence of independent regressions can\'t.'
+    },
+    quiz2: {
+      correct: 'Right. Lesson 3\'s formula subtracted the mean by hand before fitting; the column of 1s lets the regression find its own constant offset instead, which is equivalent but doesn\'t require pre-centering the data.',
+      incorrect: 'Not quite. Think back to Lesson 3\'s formula, fitted = mean(prediction) + β × (feature − mean(feature)) — the column of 1s is what lets the code skip that manual mean-centering step.'
+    }
+  };
+  ['quiz1', 'quiz2'].forEach(function(id) {
+    var quiz = document.getElementById(id);
+    var buttons = quiz.querySelectorAll('button.choice');
+    var feedback = quiz.querySelector('.feedback');
+    var answered = false;
+    buttons.forEach(function(b) {
+      b.addEventListener('click', function() {
+        if (answered) return;
+        answered = true;
+        var correct = b.getAttribute('data-correct') === 'true';
+        buttons.forEach(function(bb) {
+          if (bb.getAttribute('data-correct') === 'true') bb.classList.add('correct');
+          else if (bb === b) bb.classList.add('incorrect');
+        });
+        feedback.textContent = correct ? quizMessages[id].correct : quizMessages[id].incorrect;
+        feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+      });
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

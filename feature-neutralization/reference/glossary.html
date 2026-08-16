@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glossary — Feature Neutralization</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  dl { margin-top: 1.5em; }
+  dt { font-weight: 600; margin-top: 1.4em; font-size: 1.02rem; }
+  dd { margin-left: 0; color: var(--ink); }
+  dd .src { color: var(--muted); font-size: 0.85rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Reference</div>
+<h1>Glossary: Feature Neutralization</h1>
+<p class="lede">Terms used consistently across every lesson in this course. Print or bookmark this — it will keep growing.</p>
+
+<dl>
+
+  <dt>Era</dt>
+  <dd>
+    Numerai's unit of time in its dataset — roughly, a period during which market conditions are treated as
+    consistent. Feature-target relationships can differ substantially from one era to the next.
+  </dd>
+
+  <dt>Non-stationarity</dt>
+  <dd>
+    The property that a statistical relationship (e.g. feature-to-target correlation) changes over time rather
+    than staying fixed. The reason Numerai models can't just fit once and trust the fit forever.
+  </dd>
+
+  <dt>Correlation (Pearson)</dt>
+  <dd>
+    <code>r = covariance(X, Y) / (std_dev(X) * std_dev(Y))</code> — a number from −1 to 1 summarizing how strongly
+    two variables move together in a straight-line (linear) sense. Blind to relationships that curve.
+    Covered in Lesson 2.
+  </dd>
+
+  <dt>Monotonic relationship</dt>
+  <dd>
+    A relationship that consistently increases (or consistently decreases) as the other variable increases —
+    even if not at a constant rate, i.e. even if it curves. Weaker requirement than "linear."
+  </dd>
+
+  <dt>Feature exposure</dt>
+  <dd>
+    For a single feature: the Spearman rank correlation between a model's predictions and that feature's values.
+    Measures how much the model's output moves in lockstep with that one feature.
+    <br><span class="src">Source: <a href="https://forum.numer.ai/t/model-diagnostics-feature-exposure/899" target="_blank" rel="noopener">Model Diagnostics: Feature Exposure</a></span>
+  </dd>
+
+  <dt>Spearman rank correlation</dt>
+  <dd>
+    Pearson correlation computed on the <em>ranks</em> of two variables rather than their raw values. Measures
+    monotonic relationship strength without assuming linearity. Identical rank order gives +1; perfectly reversed
+    rank order gives −1. Covered in Lesson 2.
+  </dd>
+
+  <dt>Max feature exposure</dt>
+  <dd>
+    <code>max(abs(feature_exposures))</code> — the single largest feature exposure in absolute value. The
+    "worst-case" concentration risk in a model.
+  </dd>
+
+  <dt>RMS feature exposure</dt>
+  <dd>
+    <code>sqrt(mean(feature_exposures**2))</code> — an aggregate measure of overall reliance across all features,
+    not just the single worst one.
+  </dd>
+
+  <dt>Feature neutralization</dt>
+  <dd>
+    A technique that reduces feature exposure by regressing predictions on a set of feature exposures and
+    subtracting a proportion of the fitted (linear) component, leaving mostly the non-linear, interaction-driven
+    signal. Covered in depth in Lesson 3.
+    <br><span class="src">Source: <a href="https://forum.numer.ai/t/an-introduction-to-feature-neutralization-exposure/4955" target="_blank" rel="noopener">An Introduction to Feature Neutralization & Exposure</a></span>
+  </dd>
+
+  <dt>Proportion (neutralization parameter)</dt>
+  <dd>
+    A 0–1 knob controlling how much of the linear, feature-driven component of a prediction gets subtracted during
+    neutralization. 0 = no neutralization (original predictions). 1 = full neutralization (linear component fully
+    removed). Covered in Lesson 3.
+  </dd>
+
+  <dt>Matrix multiplication</dt>
+  <dd>
+    Combining a matrix with a vector (or another matrix) by taking dot products: each output entry is the dot
+    product of one row of the matrix with the vector. <code>Xβ</code> in the neutralization code is exactly this —
+    each row's <code>fitted</code> value is that row's features dotted with the coefficient vector β. Covered in
+    Lesson 6.
+    <br><span class="src">Source: <a href="https://www.youtube.com/watch?v=XkY2DOUCWMU" target="_blank" rel="noopener">3Blue1Brown, "Matrix multiplication as composition"</a></span>
+  </dd>
+
+  <dt>Identity matrix</dt>
+  <dd>
+    The matrix equivalent of the number 1 — square, with 1s on the diagonal and 0s elsewhere. Multiplying any
+    vector or matrix by it leaves the value unchanged. Used to define the inverse. Covered in Lesson 6.
+  </dd>
+
+  <dt>Inverse matrix</dt>
+  <dd>
+    For a square matrix <code>A</code>, the matrix <code>A⁻¹</code> such that <code>A · A⁻¹ = I</code> (the
+    identity). Only exists for square matrices whose transformation doesn't collapse dimensions (non-zero
+    determinant). Covered in Lesson 6.
+    <br><span class="src">Source: <a href="https://www.youtube.com/watch?v=uQhTuRlWMxw" target="_blank" rel="noopener">3Blue1Brown, "Inverse matrices, column space and null space"</a></span>
+  </dd>
+
+  <dt>Moore-Penrose pseudo-inverse</dt>
+  <dd>
+    A generalization of the matrix inverse (written <code>pinv(X)</code> or <code>X⁺</code>) that exists even when
+    <code>X</code> isn't square — the normal case for a feature matrix, which has far more rows (stocks) than
+    columns (features). Used to solve <code>β = pinv(X) · prediction</code> in feature neutralization. In practice,
+    computed via <code>np.linalg.lstsq</code> rather than forming <code>pinv(X)</code> directly. Covered in
+    Lessons 5 and 6.
+  </dd>
+
+</dl>
+
+</body>
+</html>

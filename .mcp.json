@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "jupyter": {
+      "command": "/home/valentin/ml-venv/bin/uvx",
+      "args": ["jupyter-mcp-server@latest"],
+      "env": {
+        "JUPYTER_URL": "http://127.0.0.1:8888",
+        "JUPYTER_TOKEN": "",
+        "ALLOW_IMG_OUTPUT": "true"
+      }
+    }
+  }
+}

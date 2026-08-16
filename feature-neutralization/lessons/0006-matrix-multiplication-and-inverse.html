@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 6 — Matrix Multiplication and the Inverse</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  table.mat { border-collapse: collapse; margin: 1.2em auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.95rem; }
+  table.mat td { border: 1px solid var(--rule); padding: 0.5em 0.9em; text-align: center; }
+  .mat-row { display: flex; align-items: center; justify-content: center; gap: 0.8em; margin: 1.4em 0; flex-wrap: wrap; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.95rem; }
+  .bracket { border-left: 2px solid var(--ink); border-right: 2px solid var(--ink); padding: 0.4em 0.7em; }
+  .bracket table td { border: none; padding: 0.15em 0.5em; }
+  .op { font-size: 1.3rem; color: var(--muted); }
+  .drag-check input[type="text"] { width: 6em; }
+  .dot-highlight { background: var(--accent-soft); }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 6 of Feature Neutralization</div>
+<h1>Matrix Multiplication and the Inverse</h1>
+<p class="lede">Lesson 5's code leaned on two ideas without spelling them out: <code>Xβ</code> (matrix multiplication) and <code>pinv(X)</code> (a generalized inverse). This lesson fills that gap with the specific numbers you already computed, so it isn't abstract.</p>
+
+<div class="callout source">
+  <strong>Primary sources:</strong>
+  <a href="https://www.youtube.com/watch?v=XkY2DOUCWMU" target="_blank" rel="noopener">3Blue1Brown, "Matrix multiplication as composition"</a> and
+  <a href="https://www.youtube.com/watch?v=uQhTuRlWMxw" target="_blank" rel="noopener">"Inverse matrices, column space and null space"</a>
+  — both from the <em>Essence of Linear Algebra</em> series. Geometric, visual, no prior linear algebra assumed. Worth watching in full; this lesson gives you just enough to read the neutralization code with understanding.
+</div>
+
+<h2>Matrix multiplication is just a batch of dot products</h2>
+<p>
+  A matrix times a vector produces a new vector. Each entry of the output is the dot product of one row of the
+  matrix with the input vector — multiply matching entries, add them up. That's the entire rule.
+</p>
+<div class="mat-row">
+  <span class="bracket"><table><tr><td>1</td><td>2</td></tr><tr><td>3</td><td>1</td></tr></table></span>
+  <span class="op">×</span>
+  <span class="bracket"><table><tr><td>4</td></tr><tr><td>5</td></tr></table></span>
+  <span class="op">=</span>
+  <span class="bracket"><table><tr><td>1·4 + 2·5</td></tr><tr><td>3·4 + 1·5</td></tr></table></span>
+  <span class="op">=</span>
+  <span class="bracket"><table><tr><td>14</td></tr><tr><td>17</td></tr></table></span>
+</div>
+<p>
+  Row 1 of the matrix, <code>[1, 2]</code>, dotted with the vector <code>[4, 5]</code> gives the first output entry.
+  Row 2 gives the second. Nothing more exotic than that.
+</p>
+
+<h2>You already did this in Lesson 5 — here it is again, explicitly</h2>
+<p>
+  <code>fitted = Xβ</code> from Lesson 5 <em>is</em> a matrix-vector multiplication. <code>X</code>'s rows are
+  stocks; its columns are <code>[feature 1, feature 2, intercept]</code>. <code>β</code> is the coefficient vector
+  <code>lstsq</code> solved for. Row A's fitted value is that row dotted with β:
+</p>
+<div class="formula">
+<code>row A features (with intercept):  [1, 5, 1]
+β (rounded):                       [0.0152, 0.0070, 0.0574]
+
+fitted_A = 1×0.0152 + 5×0.0070 + 1×0.0574</code>
+</div>
+<p>
+  That's exactly the "column of 1s" trick from Lesson 5 in matrix form: the intercept is just another column,
+  always multiplied by 1.
+</p>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">
+    Compute <code>fitted_A</code> from the dot product above: <code>1×0.0152 + 5×0.0070 + 1×0.0574</code>.
+    (round to 3 decimals)
+  </div>
+  <input type="text" id="check1-input" placeholder="0.000">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<h2>The identity matrix: the matrix version of "times 1"</h2>
+<p>
+  The identity matrix <code>I</code> has 1s down the diagonal and 0s everywhere else. Multiplying anything by it
+  changes nothing — same role as the number 1 in ordinary multiplication:
+</p>
+<div class="mat-row">
+  <span class="bracket"><table><tr><td>1</td><td>0</td></tr><tr><td>0</td><td>1</td></tr></table></span>
+  <span class="op">×</span>
+  <span class="bracket"><table><tr><td>7</td></tr><tr><td>9</td></tr></table></span>
+  <span class="op">=</span>
+  <span class="bracket"><table><tr><td>7</td></tr><tr><td>9</td></tr></table></span>
+</div>
+
+<h2>The inverse: the matrix that "undoes" a matrix</h2>
+<p>
+  For a square matrix <code>A</code>, its inverse <code>A⁻¹</code> is defined by one property:
+  <code>A · A⁻¹ = I</code>. Multiplying by <code>A</code> then by <code>A⁻¹</code> gets you back to where you
+  started — exactly like multiplying by 5 then by 1/5.
+</p>
+<div class="formula">
+<code>A = [[2, 0], [0, 4]]      A⁻¹ = [[0.5, 0], [0, 0.25]]
+
+A · A⁻¹ = [[2×0.5 + 0×0, 2×0 + 0×0.25], [0×0.5 + 4×0, 0×0 + 4×0.25]]
+        = [[1, 0], [0, 1]]  = I</code>
+</div>
+<p>
+  Two things worth knowing without proving: the inverse only exists for <strong>square</strong> matrices (same
+  number of rows and columns), and even among square matrices, some don't have one — if the matrix "flattens"
+  space into a lower dimension (e.g. every row is a multiple of another), there's no way to undo that collapse.
+  3Blue1Brown's video covers this geometrically far better than a paragraph of text can.
+</p>
+
+<h2>Why the code uses <code>lstsq</code>, not a literal inverse</h2>
+<p>
+  Lesson 5's <code>X</code> (the <code>neutralizer_arr</code>) has one row per stock and one column per feature
+  (plus the intercept column) — thousands of rows, a few hundred columns. That's not square, so
+  <code>X⁻¹</code> doesn't exist at all. The <strong>pseudo-inverse</strong>, <code>pinv(X)</code>, is what
+  generalizes "inverse" to non-square matrices: it's the matrix that gets you the closest possible
+  least-squares answer even when a perfect undo is impossible. <code>np.linalg.lstsq</code> computes the effect of
+  <code>pinv(X) · prediction</code> without ever forming <code>pinv(X)</code> explicitly, which is faster and more
+  numerically stable.
+</p>
+
+<div class="quiz" id="quiz1">
+  <div class="q">Numerai's feature matrix X has ~5,000 stock-rows and ~700 feature-columns in a given era. Why can't the code just compute a literal inverse of X and multiply it by the predictions?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">Literal inverses only work on matrices of all-positive numbers</button>
+    <button class="choice" data-correct="true">X isn't square (rows ≠ columns), and a literal inverse only exists for square matrices</button>
+    <button class="choice" data-correct="false">Literal inverses are too slow to compute at that size, but would work in principle</button>
+    <button class="choice" data-correct="false">Predictions need to be pre-sorted before an inverse can be applied</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<p>
+  With this, the pseudo-inverse in Lesson 5 stops being a black box: it's the tool that does the same job as a
+  regular inverse (solve <code>Xβ = prediction</code> for β) but works for the wide, non-square, real-world case —
+  and it's the same closest-fit idea as the least-squares regression from Lesson 3, just written in matrix form.
+</p>
+
+<footer class="ask-agent">
+  If the leap from "2×2 numbers on a page" to "a 5,000×700 feature matrix" feels too big, ask your teaching agent
+  to walk through a 3-row, 2-column example end to end — small enough to trace by hand, big enough to be
+  genuinely non-square.
+</footer>
+
+<nav class="lesson-links">
+  <span>&larr; <a href="0005-implementing-neutralization-in-code.html">Lesson 5: Implementing Neutralization in Code</a></span>
+  <span>Next: Era-wise Neutralization on Your Own Predictions &rarr; <em>(coming next session)</em></span>
+</nav>
+
+<script>
+(function() {
+  var input1 = document.getElementById('check1-input');
+  var btn1 = document.getElementById('check1-btn');
+  function check1() {
+    var val = parseFloat(input1.value);
+    var fb = document.querySelector('#check1 .feedback');
+    if (isNaN(val)) {
+      fb.textContent = 'Enter a number.';
+      fb.className = 'feedback incorrect';
+      return;
+    }
+    var expected = 1*0.0152 + 5*0.0070 + 1*0.0574;
+    var correct = Math.abs(val - expected) < 0.005;
+    fb.textContent = correct
+      ? 'Correct — 0.0152 + 0.0350 + 0.0574 ≈ 0.108. This matches fitted_A from Lesson 5\'s worked example exactly, because that\'s all Xβ ever is: one dot product per row.'
+      : 'Not quite — add the three products: 1×0.0152, 5×0.0070, and 1×0.0574, then sum them.';
+    fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn1.addEventListener('click', check1);
+  input1.addEventListener('keydown', function(e) { if (e.key === 'Enter') check1(); });
+
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(b) {
+    b.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = b.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(bb) {
+        if (bb.getAttribute('data-correct') === 'true') bb.classList.add('correct');
+        else if (bb === b) bb.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. A literal inverse requires a square matrix. A wide feature matrix (many more stocks than features) never is one, which is exactly why neutralization needs the pseudo-inverse instead.'
+        : 'Not quite. The blocker is shape, not size or sign: a literal inverse only exists for square matrices, and X here is far from square.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
