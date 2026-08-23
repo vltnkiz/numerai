@@ -1,178 +1,204 @@
-"""Pipeline entrypoint: wire download -> train -> ensemble -> neutralize -> submit.
-
-Stages exchange data as in-memory DataFrames within this one process, per
-docs/adr/0001-zemir-pipeline-architecture.md; each stage's own output is also
-persisted under `runs/<run_id>/` here, as the side effect the ADR calls for.
-
-`models` is a name -> Model mapping rather than a single model so more than
-one model type can run in the same invocation and have their predictions
-combined (zemir/ensemble.py) — [Ensembling strategy]
-(https://github.com/vltnkiz/numerai/issues/14): an equal-weight, per-era
-rank average, submitted as one series to zemir_01. A single-model run
-(`models` with one entry) skips combination entirely and submits that
-model's raw predictions unchanged — ranking a lone model's predictions
-would alter what feature neutralization sees for no benefit.
-
-Submission is gated on the *combined* validation score — the threshold/
-hard-stop decision docs/decisions #7 left open for ticket #10: if
-`validation_score.mean_corr` falls below `RunConfig.min_validation_mean_corr`,
-the run stops before neutralizing or submitting anything.
-
-No separate round-open gate: ticket #10 found `NumerAPI.check_round_open()`
-reported the round closed on a run where `upload_predictions` nonetheless
-succeeded, so it's not a reliable pre-check. Instead, ticket #11's scheduled
-GitHub Actions job fires generously across Numerai's Tuesday-Saturday window
-(docs/research/live-round-data-and-submission.md) and simply lets this
-function run every time — a genuinely closed round is expected to surface as
-a failed run via whatever exception `submit_predictions` raises, not a
-silent no-op here.
-"""
-
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
+from numerapi import NumerAPI
 
-from zemir.checks import validate_predictions
-from zemir.config import RunConfig
-from zemir.download import download
-from zemir.ensemble import combine_predictions
-from zemir.metrics import ValidationScore, score_validation
-from zemir.models.base import Model
-from zemir.neutralize import neutralize_predictions
-from zemir.submit import SubmissionResult, submit_predictions
-from zemir.train import TrainResult, train_and_validate
+from zemir.data import download
+from zemir.scoring import (
+    ValidationScore,
+    neutralize_predictions,
+    rank_normalize,
+    score_validation,
+    validate_predictions,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_0.1" / "runs"
 
+Trainer = Callable[[pd.DataFrame, pd.Series, pd.Series], object]
+
 
 class ValidationScoreBelowThreshold(RuntimeError):
-    """Raised when a run's validation score doesn't clear `min_validation_mean_corr`."""
+    pass
+
+
+@dataclass
+class SubmissionResult:
+    model_name: str
+    model_id: str
+    submission_id: str
 
 
 @dataclass
 class PipelineResult:
     run_id: str
-    train_results: dict[str, TrainResult]
-    validation_score: ValidationScore
+    validation_scores: dict[str, ValidationScore]
+    combined_validation_score: ValidationScore
     live_predictions: pd.Series
     live_predictions_neutralized: pd.Series
     submission: SubmissionResult
 
 
-def _run_dir(run_id: str) -> Path:
-    d = RUNS_DIR / run_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def _combine_predictions(predictions: dict[str, pd.Series], era: pd.Series) -> pd.Series:
+    """Equal-weight average of each model's predictions, ranked per era first."""
+    ranked = {name: preds.groupby(era).rank(pct=True) for name, preds in predictions.items()}
+    combined = sum(ranked.values()) / len(ranked)
+    return combined.rename("prediction")
 
 
-def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
-    """Run one end-to-end pipeline invocation: download, train, ensemble, neutralize, submit.
+def _load_numerai_models(env: dict[str, str] | None = None) -> dict[str, str]:
+    env = env if env is not None else os.environ
+    raw = env.get("NUMERAI_MODELS", "")
+    if not raw.strip():
+        raise ValueError("NUMERAI_MODELS is empty — add a model slot first")
 
-    `models` is caller-supplied (per docs/adr/0001) so this function is
-    identical whether it's running one model or combining several.
-    """
-    run_dir = _run_dir(config.run_id)
+    models: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        name, _, model_id = pair.partition("=")
+        if not name or not model_id:
+            raise ValueError(f"malformed NUMERAI_MODELS entry: {pair!r}")
+        models[name] = model_id
+    return models
 
-    download_result = download(config.data_version, feature_set=config.features.feature_set)
-    feature_columns = download_result.feature_sets[config.features.feature_set]
-    neutralizers = config.features.neutralizers or feature_columns
 
-    train_results = {
-        name: train_and_validate(
-            model, download_result.train, download_result.validation, feature_columns
+def _submit_predictions(
+    predictions: pd.Series, *, model_slot: str, napi: NumerAPI | None = None
+) -> SubmissionResult:
+    load_dotenv()
+    napi = napi or NumerAPI(
+        public_id=os.environ["NUMERAI_PUBLIC_ID"],
+        secret_key=os.environ["NUMERAI_SECRET_KEY"],
+    )
+    models = _load_numerai_models()
+    if model_slot not in models:
+        raise ValueError(
+            f"model slot {model_slot!r} not found in NUMERAI_MODELS (have: {sorted(models)})"
         )
-        for name, model in models.items()
+
+    frame = predictions.rename("prediction").reset_index()
+    frame = frame.rename(columns={frame.columns[0]: "id"})[["id", "prediction"]]
+    model_id = models[model_slot]
+    submission_id = napi.upload_predictions(df=frame, model_id=model_id)
+    return SubmissionResult(model_name=model_slot, model_id=model_id, submission_id=submission_id)
+
+
+def run_pipeline(
+    *,
+    run_id: str,
+    data_version: str,
+    feature_set: str,
+    neutralization_proportion: float,
+    min_validation_mean_corr: float,
+    submission_model_slot: str,
+    trainers: dict[str, Trainer],
+    neutralizers: list[str] | None = None,
+) -> PipelineResult:
+    run_dir = RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset = download(data_version, feature_set)
+    feature_columns = dataset.feature_columns
+    neutralizers = neutralizers or feature_columns
+
+    train_df = dataset.train.dropna(subset=["target"])
+    validation_df = dataset.validation.dropna(subset=["target"])
+
+    fitted_models = {
+        name: trainer(train_df[feature_columns], train_df["target"], train_df["era"])
+        for name, trainer in trainers.items()
     }
-    _write_validation_scores(run_dir, train_results)
 
-    validation_score = _combined_validation_score(download_result.validation, train_results)
-    _write_combined_validation_score(run_dir, validation_score)
+    validation_predictions = {
+        name: pd.Series(
+            model.predict(validation_df[feature_columns]),
+            index=validation_df.index,
+            name="prediction",
+        )
+        for name, model in fitted_models.items()
+    }
+    validation_scores = {
+        name: score_validation(
+            validation_df[["era", "target"]].assign(prediction=preds),
+        )
+        for name, preds in validation_predictions.items()
+    }
+    for name, score in validation_scores.items():
+        _write_score(run_dir, score, prefix=f"{name}_")
 
-    if validation_score.mean_corr < config.min_validation_mean_corr:
+    combined_validation_predictions = (
+        next(iter(validation_predictions.values()))
+        if len(validation_predictions) == 1
+        else _combine_predictions(validation_predictions, validation_df["era"])
+    )
+    combined_validation_score = score_validation(
+        validation_df[["era", "target"]].assign(prediction=combined_validation_predictions)
+    )
+    _write_score(run_dir, combined_validation_score, prefix="")
+
+    if combined_validation_score.mean_corr < min_validation_mean_corr:
         raise ValidationScoreBelowThreshold(
-            f"validation mean_corr {validation_score.mean_corr:.4f} < "
-            f"min_validation_mean_corr {config.min_validation_mean_corr:.4f} — "
+            f"validation mean_corr {combined_validation_score.mean_corr:.4f} < "
+            f"min_validation_mean_corr {min_validation_mean_corr:.4f} — "
             "stopping before neutralization/submission"
         )
 
     live_predictions_by_model = {
         name: pd.Series(
-            model.predict(download_result.live[feature_columns]),
-            index=download_result.live.index,
+            model.predict(dataset.live[feature_columns]),
+            index=dataset.live.index,
             name="prediction",
         )
-        for name, model in models.items()
+        for name, model in fitted_models.items()
     }
     live_predictions = (
         next(iter(live_predictions_by_model.values()))
         if len(live_predictions_by_model) == 1
-        else combine_predictions(live_predictions_by_model, download_result.live["era"])
+        else _combine_predictions(live_predictions_by_model, dataset.live["era"])
     )
     live_predictions.to_frame().to_csv(run_dir / "live_predictions.csv")
 
-    live_for_neutralization = download_result.live[["era"] + neutralizers].copy()
+    live_for_neutralization = dataset.live[["era"] + neutralizers].copy()
     live_for_neutralization["prediction"] = live_predictions
     live_predictions_neutralized = neutralize_predictions(
-        live_for_neutralization, neutralizers, config.neutralization.proportion
+        live_for_neutralization, neutralizers, neutralization_proportion
     )
-    live_predictions_neutralized.to_frame().to_csv(
-        run_dir / "live_predictions_neutralized.csv"
-    )
+    live_predictions_neutralized = rank_normalize(live_predictions_neutralized)
+    live_predictions_neutralized.to_frame().to_csv(run_dir / "live_predictions_neutralized.csv")
 
-    validate_predictions(live_predictions_neutralized, download_result.live["era"])
+    validate_predictions(live_predictions_neutralized, dataset.live["era"])
 
-    submission = submit_predictions(
-        live_predictions_neutralized.rename("prediction"),
-        model_slot=config.submission_model_slot,
+    submission = _submit_predictions(
+        live_predictions_neutralized.rename("prediction"), model_slot=submission_model_slot
     )
-    _write_submission(run_dir, submission)
+    (run_dir / "submission.json").write_text(
+        json.dumps(
+            {
+                "model_name": submission.model_name,
+                "model_id": submission.model_id,
+                "submission_id": submission.submission_id,
+            },
+            indent=2,
+        )
+    )
 
     return PipelineResult(
-        run_id=config.run_id,
-        train_results=train_results,
-        validation_score=validation_score,
+        run_id=run_id,
+        validation_scores=validation_scores,
+        combined_validation_score=combined_validation_score,
         live_predictions=live_predictions,
         live_predictions_neutralized=live_predictions_neutralized,
         submission=submission,
     )
-
-
-def _combined_validation_score(
-    validation_df: pd.DataFrame,
-    train_results: dict[str, TrainResult],
-    *,
-    target_col: str = "target",
-    era_col: str = "era",
-) -> ValidationScore:
-    validation_predictions = {
-        name: tr.validation_predictions for name, tr in train_results.items()
-    }
-    combined_predictions = (
-        next(iter(validation_predictions.values()))
-        if len(validation_predictions) == 1
-        else combine_predictions(validation_predictions, validation_df[era_col])
-    )
-
-    validation_df = validation_df.dropna(subset=[target_col])
-    scored = validation_df[[era_col, target_col]].copy()
-    scored["prediction"] = combined_predictions
-    return score_validation(
-        scored, target_col=target_col, prediction_col="prediction", era_col=era_col
-    )
-
-
-def _write_validation_scores(run_dir: Path, train_results: dict[str, TrainResult]) -> None:
-    for name, train_result in train_results.items():
-        _write_score(run_dir, train_result.validation_score, prefix=f"{name}_")
-
-
-def _write_combined_validation_score(run_dir: Path, validation_score: ValidationScore) -> None:
-    _write_score(run_dir, validation_score, prefix="")
 
 
 def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
@@ -188,16 +214,3 @@ def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
         )
     )
     score.era_corr.to_csv(run_dir / f"{prefix}validation_era_corr.csv", header=["corr"])
-
-
-def _write_submission(run_dir: Path, submission: SubmissionResult) -> None:
-    (run_dir / "submission.json").write_text(
-        json.dumps(
-            {
-                "model_name": submission.model_name,
-                "model_id": submission.model_id,
-                "submission_id": submission.submission_id,
-            },
-            indent=2,
-        )
-    )
