@@ -22,11 +22,11 @@ __pycache__/
 .claude/
 .agents/
 
-# Numerai API credentials (per prod/zemir_0.1/.env.example)
-prod/zemir_0.1/.env
+# Numerai API credentials (per prod/zemir_01/.env.example)
+prod/zemir_01/.env
 
-# Pipeline run artifacts (per docs/adr/0001-zemir-pipeline-architecture.md)
-prod/zemir_0.1/runs/
+# Pipeline run artifacts
+prod/zemir_01/runs/
 
 # Editor / OS
 .DS_Store

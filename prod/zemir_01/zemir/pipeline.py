@@ -20,7 +20,7 @@ from zemir.scoring import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUNS_DIR = REPO_ROOT / "prod" / "zemir_0.1" / "runs"
+RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
 
 Trainer = Callable[[pd.DataFrame, pd.Series, pd.Series], object]
 
