@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 7 — Era-wise CORR and Neutralization</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .code-block {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1em 1.2em;
+    overflow-x: auto;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    margin: 1.2em 0;
+    white-space: pre;
+  }
+  .code-block .cm { color: var(--muted); }
+  table.eras { border-collapse: collapse; margin: 1.2em 0; font-size: 0.9rem; width: 100%; }
+  table.eras th, table.eras td {
+    border: 1px solid var(--rule); padding: 0.4em 0.7em; text-align: center;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85rem;
+  }
+  table.eras th:first-child, table.eras td:first-child { text-align: left; font-family: inherit; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 7 of Feature Neutralization</div>
+<h1>Why Everything Happens Per-Era</h1>
+<p class="lede">Every computation across Lessons 1–6 — correlation, exposure, neutralization — has quietly had an
+  <code>era</code> attached to it. This lesson makes that explicit: why CORR is measured <em>within</em> each era
+  rather than pooled across all rows, and why neutralization is applied the same way.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong>
+  <a href="https://github.com/numerai/example-scripts/blob/master/numerai/feature_neutralization.ipynb" target="_blank" rel="noopener">numerai/example-scripts — <code>feature_neutralization.ipynb</code></a>,
+  the official walkthrough notebook (you have a local copy in <code>example-scripts/numerai/</code>). Every code
+  snippet below is quoted from it.
+</div>
+
+<h2>An era is Numerai's unit of "comparable"</h2>
+<p>
+  An <strong>era</strong> is a snapshot: every stock in it was scored using the same time window, the same market
+  conditions. Stocks <em>within</em> one era are directly comparable — you can meaningfully ask "did stock A
+  outperform stock B this period?" Stocks in <em>different</em> eras are not directly comparable that way, because
+  the market regime underneath them can be completely different. That's <a href="../reference/glossary.html">non-stationarity</a>,
+  the idea from Lesson 1 that feature-target relationships drift or reverse over time.
+</p>
+<p>
+  This one fact — comparability lives inside an era, not across eras — is the reason both CORR and neutralization
+  get looped over eras instead of computed once on the whole dataset.
+</p>
+
+<h2>Why CORR is computed per-era</h2>
+<p>
+  Here's the actual code, computing each feature's correlation with the target:
+</p>
+<div class="code-block">per_era_corr = train.groupby("era").apply(
+    lambda d: numerai_corr(d[med_serenity_feats], d["target"])
+)</div>
+<p>
+  <code>groupby("era")</code> splits the data into one cross-section per era, and <code>numerai_corr</code> runs
+  separately on each slice. Two reasons this matters, not one:
+</p>
+<p>
+  <strong>1. It's literally how you get paid.</strong> Numerai's tournament doesn't score you with one correlation
+  computed over every row you've ever submitted. It computes a correlation <em>per era</em>, then averages those
+  per-era numbers. A practice metric that pools all rows together is measuring something your payout doesn't
+  depend on — so if you want a number that predicts your score, it has to be built the same way the score is built.
+</p>
+<p>
+  <strong>2. Pooling would let one era dominate, and reward the wrong thing.</strong> Imagine one era happens to
+  have unusually large target spreads, or a feature with an unusually wide range that period. A single correlation
+  computed across all rows at once lets that one era's scale swamp the signal from every other era — you'd be
+  measuring "did this feature line up with the target in the biggest era," not "does this feature reliably help,
+  era after era." Averaging per-era correlations instead treats every era as one vote, regardless of how extreme
+  its values happened to be.
+</p>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">
+    Two toy eras, feature vs. target correlation: Era A = 0.10, Era B = 0.02. Pooling all rows from both eras into
+    one correlation calculation (weighted roughly by each era's variance) would let Era A's number dominate the
+    result. What does averaging the two per-era numbers give you instead? (round to 2 decimals)
+  </div>
+  <input type="text" id="check1-input" placeholder="0.00">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<h2>Why neutralization is also looped per-era</h2>
+<p>
+  Same pattern, this time for neutralizing predictions against features:
+</p>
+<div class="code-block">neutralized = validation.groupby("era", group_keys=True).apply(
+    lambda d: neutralize(
+      d[["prediction"]],
+      d[med_serenity_feats],
+      proportion=proportion
+    )
+)</div>
+<p>
+  Recall from Lesson 5: neutralization solves <code>β = pinv(X) · prediction</code>, where <code>X</code> is the
+  feature matrix, then subtracts <code>proportion × Xβ</code> from the predictions. The question is: what rows
+  should be stacked into <code>X</code> when solving for β?
+</p>
+<p>
+  <strong>If you stacked every era into one giant <code>X</code></strong>, <code>pinv(X)</code> would solve for a
+  single β per feature that best fits the fitted-vs-prediction relationship <em>averaged over the entire
+  non-stationary history</em>. But you already know from Lesson 1 that a feature's relationship to the target (and
+  therefore to predictions built from it) can reverse between eras. A β that's a compromise across regimes that
+  disagree with each other fits none of them well — it's the same failure mode as pooling CORR, just one step
+  further downstream.
+</p>
+<p>
+  <strong>Looping per era instead</strong> solves a fresh β for each era's own cross-section of stocks. The
+  neutralization removes exactly the linear relationship between predictions and features <em>as they actually
+  stood in that snapshot</em> — not some blended average that may not describe any single era. This keeps
+  neutralization doing its actual job: stripping out the part of a prediction explainable by feature values,
+  measured honestly against the conditions the model will be scored under, one era at a time.
+</p>
+
+<div class="quiz" id="quiz1">
+  <div class="q">A feature has β ≈ +0.4 (positive relationship to predictions) in the first half of training eras, and β ≈ −0.4 (negative relationship) in the second half. What happens if you neutralize using one β solved across all eras pooled together, versus one β solved per era?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">No difference — pinv(X) always finds the same β regardless of how rows are grouped</button>
+    <button class="choice" data-correct="true">The pooled β lands near 0 (the two halves cancel out), so pooled neutralization barely touches the exposure in either half — while per-era neutralization correctly removes the +0.4 exposure from the first half and the −0.4 exposure from the second half</button>
+    <button class="choice" data-correct="false">The pooled β lands near ±0.4 in both cases, so it makes no practical difference which way you loop</button>
+    <button class="choice" data-correct="false">Per-era neutralization is only about speed — it produces the same β values as pooling, just computed faster</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<h2>The same idea, twice</h2>
+<p>
+  Both halves of this lesson are one idea wearing two hats: an era is the unit within which stocks are comparable,
+  because it's the unit within which market conditions — and therefore feature-target relationships — are held
+  roughly fixed. CORR measures how well predictions line up with the target <em>inside</em> that unit, then
+  averages across units to avoid letting any one era's scale or one part of history's regime dominate. Neutralization
+  removes the feature-explained part of a prediction <em>inside</em> that same unit, for the identical reason: a
+  β averaged across regimes that disagree describes neither of them.
+</p>
+
+<footer class="ask-agent">
+  If it's not yet clear why the tournament's actual payout formula (rather than just "more correlation is
+  better") is itself computed as an average of per-era numbers, ask your teaching agent — it's the same
+  non-stationarity argument from Lesson 1, one level up.
+</footer>
+
+<nav class="lesson-links">
+  <span>&larr; <a href="0006-matrix-multiplication-and-inverse.html">Lesson 6: Matrix Multiplication and Inverse</a></span>
+  <span>Next: Applying This to Your Own Model &rarr; <em>(coming next session)</em></span>
+</nav>
+
+<script>
+(function() {
+  var input1 = document.getElementById('check1-input');
+  var btn1 = document.getElementById('check1-btn');
+  function check1() {
+    var val = parseFloat(input1.value);
+    var fb = document.querySelector('#check1 .feedback');
+    if (isNaN(val)) {
+      fb.textContent = 'Enter a number.';
+      fb.className = 'feedback incorrect';
+      return;
+    }
+    var expected = (0.10 + 0.02) / 2;
+    var correct = Math.abs(val - expected) < 0.005;
+    fb.textContent = correct
+      ? 'Correct — (0.10 + 0.02) / 2 = 0.06. Each era counts equally, regardless of how large or extreme its own values were. That is what "average of per-era correlations" buys you over pooling everything into one calculation.'
+      : 'Not quite — average the two per-era numbers directly: (0.10 + 0.02) / 2.';
+    fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn1.addEventListener('click', check1);
+  input1.addEventListener('keydown', function(e) { if (e.key === 'Enter') check1(); });
+
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(b) {
+    b.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = b.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(bb) {
+        if (bb.getAttribute('data-correct') === 'true') bb.classList.add('correct');
+        else if (bb === b) bb.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. Pooling averages away the very thing you\'re trying to remove when the relationship flips sign between regimes — the pooled β is a compromise that fits neither era. Per-era neutralization solves a fresh β each time, so it tracks the relationship as it actually was in that snapshot.'
+        : 'Not quite. Think about what pinv(X) does when the rows it sees contain two opposite relationships (+0.4 then −0.4) — averaging opposite slopes pulls the solved β toward zero, which under-corrects both halves.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

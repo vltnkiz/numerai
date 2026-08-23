@@ -19,5 +19,8 @@
 - [Numerai Forum](https://forum.numer.ai)
   The primary community for Numerai model-building discussion; both knowledge sources above are threads from it. Use for: troubleshooting model-specific exposure/neutralization results, seeing how other participants tune the `proportion` parameter.
 
+- [numerai/example-scripts — `feature_neutralization.ipynb`](https://github.com/numerai/example-scripts/blob/master/numerai/feature_neutralization.ipynb)
+  The official walkthrough notebook (local copy in `example-scripts/numerai/`). Shows both `numerai_corr` and `neutralize` called inside `groupby("era").apply(...)`. Use for: grounding why CORR and neutralization are computed per-era rather than pooled across the dataset.
+
 ## Gaps
-- Filled: the `numerai-tools` `neutralize` function (above) covers single-call implementation. Still open: era-wise looping (applying `neutralize` per era rather than across the whole dataset at once) and the official `example-scripts/feature_neutralization.ipynb` walkthrough — look these up for the next implementation-focused lesson.
+- Filled: the `numerai-tools` `neutralize` function and era-wise looping (both CORR and `neutralize` inside `groupby("era")`) are now covered. Still open: applying this end-to-end to the user's own trained model/predictions, and the tournament's actual scoring formula details (MMC, payout curve) — explicitly out of scope per MISSION.md unless it becomes necessary.
