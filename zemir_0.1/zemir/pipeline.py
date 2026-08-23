@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from zemir.checks import validate_predictions
 from zemir.config import RunConfig
 from zemir.download import download
 from zemir.ensemble import combine_predictions
@@ -122,6 +123,8 @@ def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
     live_predictions_neutralized.to_frame().to_csv(
         run_dir / "live_predictions_neutralized.csv"
     )
+
+    validate_predictions(live_predictions_neutralized, download_result.live["era"])
 
     submission = submit_predictions(
         live_predictions_neutralized.rename("prediction"),
