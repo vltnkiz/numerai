@@ -24,10 +24,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install zemir
-        run: pip install -e ./prod/zemir_0.1
+        run: pip install -e ./prod/zemir_01
 
       - name: Run pipeline
-        working-directory: prod/zemir_0.1
+        working-directory: prod/zemir_01
         env:
           NUMERAI_PUBLIC_ID: ${{ secrets.NUMERAI_PUBLIC_ID }}
           NUMERAI_SECRET_KEY: ${{ secrets.NUMERAI_SECRET_KEY }}
