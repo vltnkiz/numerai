@@ -1,0 +1,3 @@
+# Grasps performance stationarity as a distinct goal from mean return
+
+User confirmed lesson 1 ("What Is Performance Stationarity?") was clear — no corrections requested. They now have the foundation that two models with the same average correlation can carry different risk if one clusters wins/losses into streaks ("memoryless" vs. autocorrelated performance), and that this traces back to non-stationary market features. This unlocks moving directly to the era boosting *algorithm* (lesson 2), since the motivating "why" no longer needs re-teaching — lesson 2 can assume this and focus on mechanics (build → score per-era corr → retrain on worst half → repeat).

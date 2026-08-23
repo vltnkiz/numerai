@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 1 — What Is Performance Stationarity?</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<div class="kicker">Lesson 1 of Era Boosting</div>
+<h1>What Is Performance Stationarity?</h1>
+<p class="lede">Two models can share the same average return and still carry very different risk. Stationarity is the property that tells them apart.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong> read
+  <a href="https://forum.numer.ai/t/performance-stationarity/151" target="_blank" rel="noopener">"Performance Stationarity"</a>
+  by richai on the Numerai forum before or after this lesson — everything here is grounded in it.
+</div>
+
+<h2>Same average, different risk</h2>
+<p>
+  Imagine two models. Both correctly predict the market direction 80% of eras. Model A's correct and incorrect
+  eras look like this:
+</p>
+<div class="formula"><code>Model A:  H H H H T H H H T H H H T H H H H T</code></div>
+<p>
+  Model B, with the exact same 80% hit rate over the same span, looks like this instead:
+</p>
+<div class="formula"><code>Model B:  T T T H H H H H H H H H T T T T T H H H H H H H H</code></div>
+<p>
+  Same average. Very different experience of holding the model. Model B has two brutal stretches — five losses in
+  a row, then five more — before it ever pays off. Model A never strings together more than one loss at a time.
+  If you're staking real money on Numerai, A is the model you can sleep at night with. B is the one that gets you
+  to sell at the bottom of a drawdown, right before it turns around.
+</p>
+
+<h2>The concept: stationarity as "no memory"</h2>
+<p>
+  richai's framing: a model's sequence of good and bad eras should behave like <strong>flipping a biased
+  coin</strong> — "lacking autocorrelation / being memoryless / having no long burn periods." <em>Autocorrelation</em>
+  here just means: does knowing today's result help you predict tomorrow's? For a fair (or biased-but-independent)
+  coin, no — every flip is its own event. Model A's sequence looks like that. Model B's doesn't: once it's in a bad
+  patch, the bad patch tends to continue. That's positive autocorrelation in the losses, and it's exactly what
+  "non-stationary performance" means in this context.
+</p>
+<p>
+  This is a specific, narrower use of "stationary" than the general statistics term (which is about a process's
+  statistical properties — mean, variance — not changing over time). Here, it's applied specifically to the
+  <em>sequence of era-by-era performance</em>: does the win/loss pattern look memoryless, or does it look clumpy?
+</p>
+
+<h2>Why this happens: the features aren't stationary either</h2>
+<p>
+  richai traces the cause upstream: stock-market features like value and momentum are themselves
+  <strong>non-stationary</strong> — they cycle through regimes where they work well, then regimes where they don't,
+  and back again. A model trained on these features, without any special care, inherits that instability. It
+  performs well while its favored features are "in regime," and drops hard when they aren't. This is the same
+  underlying idea as feature exposure from the sibling neutralization lessons — reliance on unstable features is
+  the mechanism, and reducing that reliance (via neutralization, or as you'll see next, via a training-time fix)
+  is how you address it.
+</p>
+
+<h2>Why mean return isn't enough</h2>
+<p>
+  The Sharpe ratio — mean return divided by standard deviation of returns — already penalizes variance. But it
+  treats a scattered set of bad eras the same as five bad eras in a row, as long as the total variance matches.
+  richai's post introduces <strong>Smart Sharpe</strong> to close that gap: a Sharpe ratio with an extra penalty
+  for autocorrelation.
+</p>
+<div class="formula"><code>smart_sharpe(x) = mean(x) / (std(x) &times; autocorr_penalty(x))
+</code></div>
+<p>
+  You don't need the internals of <code>autocorr_penalty</code> yet — the point to take away is just what it's
+  <em>for</em>: two models can have identical plain Sharpe ratios and different Smart Sharpe ratios, because Smart
+  Sharpe additionally punishes the "clumpy" model. It's a way of putting a number on the Model A vs. Model B
+  distinction above.
+</p>
+
+<h2>The open question</h2>
+<p>
+  richai poses this as a question, not a solved problem: should models be trained to directly optimize for
+  stationarity, rather than just mean correlation? That question is exactly what the next lesson's technique —
+  <strong>era boosting</strong> — is an attempt to answer.
+</p>
+
+<div class="quiz" id="quiz1">
+  <div class="q">Model X and Model Y have identical Sharpe ratios. Model X's bad eras are scattered randomly through history; Model Y's bad eras cluster into two long multi-era drawdowns. What does the stationarity framing say about them?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">They carry identical risk, since Sharpe ratio already captures everything that matters</button>
+    <button class="choice" data-correct="true">Model Y is riskier to hold, since its losses show autocorrelation (clumping) that Model X's don't</button>
+    <button class="choice" data-correct="false">Model X is riskier, since scattered losses are less predictable than clustered ones</button>
+    <button class="choice" data-correct="false">Neither model's return sequence can be evaluated for stationarity, only their features can</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">Which of these two 10-era sequences looks more stationary (memoryless)? Answer 1 or 2.<br>1: H T H H T H T H T H &nbsp;&nbsp; 2: H H H H H T T T T T</div>
+  <input type="text" id="check1-input" placeholder="1 or 2">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<footer class="ask-agent">
+  Something unclear — autocorrelation, Smart Sharpe, why features drive this — ask your teaching agent directly;
+  that's what it's here for.
+</footer>
+
+<nav class="lesson-links">
+  <span><a href="../reference/glossary.html">Glossary</a></span>
+  <span>Next: <a href="0002-the-era-boosting-algorithm.html">The Era Boosting Algorithm</a> &rarr;</span>
+
+</nav>
+
+<script>
+(function() {
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = btn.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(b) {
+        if (b.getAttribute('data-correct') === 'true') b.classList.add('correct');
+        else if (b === btn) b.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. Same Sharpe, different risk: Y\'s losses cluster (positive autocorrelation), which is exactly what stationarity flags as dangerous even when variance alone looks the same.'
+        : 'Not quite. Sharpe ratio doesn\'t distinguish clumped losses from scattered ones — that\'s the gap stationarity (and Smart Sharpe) is meant to catch.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+
+  var input = document.getElementById('check1-input');
+  var btn = document.getElementById('check1-btn');
+  function check() {
+    var val = input.value.trim();
+    var fb2 = document.querySelector('#check1 .feedback');
+    if (val !== '1' && val !== '2') {
+      fb2.textContent = 'Enter 1 or 2.';
+      fb2.className = 'feedback incorrect';
+      return;
+    }
+    var correct = val === '1';
+    fb2.textContent = correct
+      ? 'Correct — sequence 1 alternates without long runs, closer to a memoryless coin flip. Sequence 2 has two long runs (HHHHH then TTTTT), a textbook autocorrelated, non-stationary pattern.'
+      : 'Not quite — sequence 2 has two long unbroken runs, which is the clumping pattern stationarity warns about. Sequence 1 is the more memoryless one.';
+    fb2.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn.addEventListener('click', check);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') check(); });
+})();
+</script>
+
+</body>
+</html>

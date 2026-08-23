@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 3 — Implementing Era Boosting</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<div class="kicker">Lesson 3 of Era Boosting</div>
+<h1>Implementing Era Boosting</h1>
+<p class="lede">Lesson 2 gave you the loop: build &rarr; score &rarr; keep worst &rarr; retrain &rarr; repeat. This lesson turns that loop into real XGBoost code, annotated line by line, so you can run it yourself.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong> the code below is drawn directly from
+  <a href="https://forum.numer.ai/t/era-boosted-models/189" target="_blank" rel="noopener">"Era Boosted Models"</a>
+  by richai — read the full post for the surrounding narrative and results.
+</div>
+
+<h2>The warm-start trick</h2>
+<p>
+  One detail lesson 2's pseudocode glossed over: how do you "add trees to only the worst eras" without throwing
+  away the trees you already built? XGBoost lets you hand a partially-built model back into <code>.fit()</code>
+  and keep growing it:
+</p>
+<div class="formula"><code>model = XGBRegressor(max_depth=5, learning_rate=0.01,
+                     n_estimators=trees_per_step, colsample_bytree=0.1)
+model.fit(X, y)                       # round 1: trees 1..10, on ALL eras
+
+# ...score eras, select the worst proportion into worst_df...
+
+model.n_estimators += trees_per_step  # now targeting 20 total
+booster = model.get_booster()
+model.fit(worst_df[features], worst_df["target"], xgb_model=booster)
+</code></div>
+<p>
+  <code>xgb_model=booster</code> is the whole trick: instead of training a fresh model, XGBoost keeps every tree
+  already built and adds <code>trees_per_step</code> more on top, trained only on <code>worst_df</code> — the
+  rows from this round's worst-performing eras. That's what makes it <em>era boosting</em> and not just
+  "boosting, then filter" &mdash; the worst-era targeting happens inside the same growing ensemble, round after
+  round.
+</p>
+<p>
+  <code>max_depth=5</code>, <code>learning_rate=0.01</code>, <code>colsample_bytree=0.1</code> are richai's
+  chosen defaults — small, slow-learning trees that sample only 10% of features each split. You don't need to
+  derive why those particular values from XGBoost internals (out of scope here); just know they're deliberately
+  conservative, because each round already narrows the training data to a worst-case subset, and aggressive
+  trees on a narrow subset overfit fast.
+</p>
+
+<h2>Scoring each era</h2>
+<p>
+  This is the "score every era separately" step from lesson 2, spelled out:
+</p>
+<div class="formula"><code>from scipy.stats import spearmanr
+
+era_scores = {}
+for era in df["era"].unique():
+    era_df = df[df["era"] == era]
+    era_scores[era] = spearmanr(era_df["pred"], era_df["target"])[0]
+</code></div>
+<p>
+  <code>era_scores</code> ends up as one correlation number per era — exactly the <code>Corr</code> row from
+  lesson 2's 6-era walkthrough. Sorting this dict and keeping the bottom <code>proportion</code> of eras is what
+  produces <code>worst_df</code> above.
+</p>
+
+<h2>Measuring the before/after Sharpe</h2>
+<p>
+  Once you have <code>era_scores</code> for a model (before <em>or</em> after era boosting), the same three
+  lines give you the numbers to compare:
+</p>
+<div class="formula"><code>print(np.mean(era_scores.values()))                      # mean correlation
+print(np.mean(era_scores.values()) / np.std(era_scores.values()))  # plain Sharpe
+print(smart_sharpe(era_scores.values()))                  # autocorrelation-penalized Sharpe
+</code></div>
+<p>
+  To see the effect era boosting has, run this scoring block twice: once on a model trained the ordinary way
+  (a single <code>model.fit(X, y)</code> with no worst-era loop), and once on the era-boosted model above. The
+  gap between the two Sharpe numbers <em>is</em> the result you're trying to reproduce — richai's post reports
+  2.28 &rarr; 21.99 in-sample. Your numbers won't match exactly (different data, different era count), but the
+  direction — plain Sharpe well below era-boosted Sharpe — is the thing to confirm.
+</p>
+<div class="callout">
+  <strong>Remember the caveat from lesson 2:</strong> whatever Sharpe gap you measure this way is in-sample. It
+  tells you era boosting is doing what it claims on the training data — it does not by itself tell you the gain
+  survives on validation eras the model never trained on. Treat a big in-sample gap as "the mechanism is
+  working," not yet as "this will help my live model."
+</div>
+
+<h2>Putting the full loop together</h2>
+<div class="formula"><code>def era_boost_train(X, y, era_col, proportion=0.5, trees_per_step=10, num_iters=200):
+    model = XGBRegressor(max_depth=5, learning_rate=0.01,
+                         n_estimators=trees_per_step, colsample_bytree=0.1)
+    model.fit(X, y)
+
+    new_df = X.copy()
+    new_df["target"] = y
+    new_df["era"] = era_col
+
+    for i in range(num_iters):
+        new_df["pred"] = model.predict(X)
+        era_scores = {}
+        for era in new_df["era"].unique():
+            era_df = new_df[new_df["era"] == era]
+            era_scores[era] = spearmanr(era_df["pred"], era_df["target"])[0]
+
+        worst_eras = sorted(era_scores, key=era_scores.get)[:int(len(era_scores) * proportion)]
+        worst_df = new_df[new_df["era"].isin(worst_eras)]
+
+        model.n_estimators += trees_per_step
+        booster = model.get_booster()
+        model.fit(worst_df.drop(columns=["target", "era", "pred"]), worst_df["target"], xgb_model=booster)
+
+    return model, era_scores
+</code></div>
+<p>
+  Every piece here is one of lesson 2's four steps, now with a concrete line of code behind it: build
+  (<code>model.fit</code>), score (the <code>spearmanr</code> loop), keep worst (<code>sorted(...)[:cutoff]</code>),
+  retrain (<code>model.fit(worst_df..., xgb_model=booster)</code>).
+</p>
+
+<div class="quiz" id="quiz1">
+  <div class="q">After round 1, each subsequent call to <code>model.fit(...)</code> in the loop trains on:</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">The full original training set X, y again</button>
+    <button class="choice" data-correct="true">Only worst_df — the rows from this round's worst-performing eras</button>
+    <button class="choice" data-correct="false">A random 50% sample of all eras, refreshed each round</button>
+    <button class="choice" data-correct="false">Only the single worst era, dropping the rest of the bottom proportion</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">trees_per_step=10, num_iters=20 (richai's headline run). How many total trees does the final model have?</div>
+  <input type="text" id="check1-input" placeholder="a number">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<h2>Your turn</h2>
+<p>
+  Run this in your own notebook against your Numerai training data:
+</p>
+<ol>
+  <li>Train a plain <code>XGBRegressor</code> the ordinary way, score its <code>era_scores</code>, print mean
+  correlation and plain Sharpe.</li>
+  <li>Run <code>era_boost_train</code> above on the same data, score its final <code>era_scores</code>, print
+  the same numbers.</li>
+  <li>Compare the two Sharpe numbers. Confirm the era-boosted model's is higher — that's the in-sample effect
+  working as intended.</li>
+</ol>
+<p>
+  A cheat sheet with this full annotated code lives in the <a href="../reference/era-boosting-code.html">code
+  reference</a> for when you're implementing this later without re-reading the lesson.
+</p>
+
+<footer class="ask-agent">
+  Something unclear — the warm-start mechanics, why worst_df drops columns before fitting, or how to adapt this
+  to your own feature set — ask your teaching agent directly; that's what it's here for.
+</footer>
+
+<nav class="lesson-links">
+  <span><a href="0002-the-era-boosting-algorithm.html">&larr; Lesson 2</a> &middot; <a href="../reference/glossary.html">Glossary</a> &middot; <a href="../reference/era-boosting-code.html">Code reference</a></span>
+  <span></span>
+</nav>
+
+<script>
+(function() {
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = btn.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(b) {
+        if (b.getAttribute('data-correct') === 'true') b.classList.add('correct');
+        else if (b === btn) b.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. worst_df holds only rows from the worst proportion of eras this round, and xgb_model=booster means those new trees are added to the existing ensemble rather than starting over.'
+        : 'Not quite. Each round narrows to worst_df — the current round\'s worst-performing eras only — and xgb_model=booster keeps building on the same ensemble rather than retraining from scratch.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+
+  var input = document.getElementById('check1-input');
+  var btn = document.getElementById('check1-btn');
+  function check() {
+    var val = input.value.trim();
+    var fb2 = document.querySelector('#check1 .feedback');
+    var correct = val === '200';
+    if (val === '') {
+      fb2.textContent = 'Enter a number.';
+      fb2.className = 'feedback incorrect';
+      return;
+    }
+    fb2.textContent = correct
+      ? 'Correct — trees_per_step accumulates every round: 10 × 20 = 200 total trees, matching the 200-tree headline result.'
+      : 'Not quite — n_estimators grows by trees_per_step every round: 10 × 20 = 200 total trees.';
+    fb2.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn.addEventListener('click', check);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') check(); });
+})();
+</script>
+
+</body>
+</html>

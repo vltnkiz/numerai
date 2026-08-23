@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Code Reference — Era Boosting</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<div class="kicker">Reference</div>
+<h1>Code Reference: Era Boosting</h1>
+<p class="lede">The full annotated implementation from lesson 3. Print or bookmark this — it's the thing to copy from when you're building this for real.</p>
+
+<div class="callout source">
+  <strong>Source:</strong> adapted from
+  <a href="https://forum.numer.ai/t/era-boosted-models/189" target="_blank" rel="noopener">"Era Boosted Models"</a>
+  by richai on the Numerai forum.
+</div>
+
+<h2>The training loop</h2>
+<div class="formula"><code>from scipy.stats import spearmanr
+from xgboost import XGBRegressor
+import numpy as np
+
+def era_boost_train(X, y, era_col, proportion=0.5, trees_per_step=10, num_iters=200):
+    model = XGBRegressor(max_depth=5, learning_rate=0.01,
+                         n_estimators=trees_per_step, colsample_bytree=0.1)
+    model.fit(X, y)
+
+    new_df = X.copy()
+    new_df["target"] = y
+    new_df["era"] = era_col
+
+    for i in range(num_iters):
+        new_df["pred"] = model.predict(X)
+        era_scores = {}
+        for era in new_df["era"].unique():
+            era_df = new_df[new_df["era"] == era]
+            era_scores[era] = spearmanr(era_df["pred"], era_df["target"])[0]
+
+        worst_eras = sorted(era_scores, key=era_scores.get)[:int(len(era_scores) * proportion)]
+        worst_df = new_df[new_df["era"].isin(worst_eras)]
+
+        model.n_estimators += trees_per_step
+        booster = model.get_booster()
+        model.fit(worst_df.drop(columns=["target", "era", "pred"]), worst_df["target"], xgb_model=booster)
+
+    return model, era_scores
+</code></div>
+
+<h2>Scoring before/after Sharpe</h2>
+<div class="formula"><code>scores = list(era_scores.values())
+print(np.mean(scores))               # mean correlation
+print(np.mean(scores) / np.std(scores))  # plain Sharpe
+print(smart_sharpe(scores))          # autocorrelation-penalized Sharpe
+</code></div>
+<p>
+  Run the plain-Sharpe line on a model trained with a single <code>model.fit(X, y)</code> (no worst-era loop),
+  and again on <code>era_boost_train</code>'s output, to reproduce the before/after comparison.
+</p>
+
+<h2>Parameter defaults</h2>
+<table style="width:100%; border-collapse:collapse; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:0.9rem;">
+<tr style="border-bottom:1px solid var(--rule);"><th style="text-align:left; padding:0.4em 0;">Param</th><th style="text-align:left; padding:0.4em 0;">richai's default</th></tr>
+<tr style="border-bottom:1px solid var(--rule);"><td style="padding:0.4em 0;"><code>proportion</code></td><td style="padding:0.4em 0;">0.5</td></tr>
+<tr style="border-bottom:1px solid var(--rule);"><td style="padding:0.4em 0;"><code>trees_per_step</code></td><td style="padding:0.4em 0;">10</td></tr>
+<tr style="border-bottom:1px solid var(--rule);"><td style="padding:0.4em 0;"><code>num_iters</code></td><td style="padding:0.4em 0;">20 (&rarr; 200 total trees)</td></tr>
+<tr style="border-bottom:1px solid var(--rule);"><td style="padding:0.4em 0;"><code>max_depth</code></td><td style="padding:0.4em 0;">5</td></tr>
+<tr style="border-bottom:1px solid var(--rule);"><td style="padding:0.4em 0;"><code>learning_rate</code></td><td style="padding:0.4em 0;">0.01</td></tr>
+<tr><td style="padding:0.4em 0;"><code>colsample_bytree</code></td><td style="padding:0.4em 0;">0.1</td></tr>
+</table>
+
+<div class="callout">
+  <strong>Caveat to keep attached to any result:</strong> the 2.28 &rarr; 21.99 Sharpe jump this code reproduces
+  is in-sample only. See <a href="../lessons/0002-the-era-boosting-algorithm.html">lesson 2</a> for why that
+  matters.
+</div>
+
+<nav class="lesson-links">
+  <span><a href="../lessons/0003-implementing-era-boosting.html">&larr; Lesson 3</a> &middot; <a href="glossary.html">Glossary</a></span>
+  <span></span>
+</nav>
+
+</body>
+</html>

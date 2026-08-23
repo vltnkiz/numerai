@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Glossary — Era Boosting</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  dl { margin-top: 1.5em; }
+  dt { font-weight: 600; margin-top: 1.4em; font-size: 1.02rem; }
+  dd { margin-left: 0; color: var(--ink); }
+  dd .src { color: var(--muted); font-size: 0.85rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Reference</div>
+<h1>Glossary: Performance Stationarity & Era Boosting</h1>
+<p class="lede">Terms used consistently across every lesson in this course. Print or bookmark this — it will keep growing.</p>
+
+<dl>
+
+  <dt>Era</dt>
+  <dd>
+    Numerai's unit of time in its dataset — roughly, a period during which market conditions are treated as
+    consistent. Performance and feature-target relationships can differ substantially from one era to the next.
+  </dd>
+
+  <dt>Performance stationarity</dt>
+  <dd>
+    The property that a model's sequence of good/bad eras is "memoryless" — behaves like a biased coin flip, with
+    no long clumps of consecutive losses (or wins). A narrower, applied version of the general statistics term
+    "stationary process."
+    <br><span class="src">Source: <a href="https://forum.numer.ai/t/performance-stationarity/151" target="_blank" rel="noopener">Performance Stationarity</a></span>
+  </dd>
+
+  <dt>Autocorrelation</dt>
+  <dd>
+    How much a sequence's value at one point predicts its value shortly after. Near zero for a memoryless sequence;
+    positive when good/bad eras tend to follow their own kind (a losing era makes the next era more likely to lose
+    too). The mathematical signature of non-stationary performance.
+  </dd>
+
+  <dt>Sharpe ratio</dt>
+  <dd>
+    <code>mean(returns) / std(returns)</code> — average return per unit of volatility. Rewards consistency in
+    magnitude, but blind to <em>order</em>: it scores a scattered set of bad eras identically to the same bad eras
+    all clustered together, as long as the variance matches.
+  </dd>
+
+  <dt>Smart Sharpe</dt>
+  <dd>
+    <code>mean(x) / (std(x) &times; autocorr_penalty(x))</code> — Sharpe ratio with an added penalty for
+    autocorrelation. Two models with equal plain Sharpe can have different Smart Sharpe if one has clumpier losses.
+    <br><span class="src">Source: <a href="https://forum.numer.ai/t/performance-stationarity/151" target="_blank" rel="noopener">Performance Stationarity</a></span>
+  </dd>
+
+  <dt>Non-stationary features</dt>
+  <dd>
+    Stock-market features (e.g. value, momentum) whose relationship to the target cycles through working and
+    non-working regimes over time, rather than staying fixed. Named as the upstream cause of non-stationary model
+    performance: a model trained on unstable features inherits that instability.
+  </dd>
+
+  <dt>Era boosting</dt>
+  <dd>
+    A training-time technique for gradient-boosted models: after building an initial batch of trees, score
+    per-era correlation, then build the next batch of trees using only the worst-performing eras. Repeating this
+    pushes the model toward more equal performance across eras, rather than just maximizing mean correlation.
+    <br><span class="src">Source: <a href="https://forum.numer.ai/t/era-boosted-models/189" target="_blank" rel="noopener">Era Boosted Models</a></span>
+  </dd>
+
+  <dt>proportion (era boosting parameter)</dt>
+  <dd>
+    The fraction of eras (ranked worst to best by per-era correlation) kept for the next round of tree-building.
+    richai's original post uses <code>proportion=0.5</code> — the bottom half of eras by performance.
+  </dd>
+
+  <dt>trees_per_step / num_iters</dt>
+  <dd>
+    <code>trees_per_step</code>: how many new trees are added in each era boosting round (10, in the original
+    post). <code>num_iters</code>: how many rounds are run in total (leading to 200 trees over 20 rounds in the
+    original post's headline result).
+  </dd>
+
+</dl>
+
+<nav class="lesson-links">
+  <span><a href="../lessons/0001-what-is-performance-stationarity.html">&larr; Lesson 1</a> &middot; <a href="../lessons/0002-the-era-boosting-algorithm.html">Lesson 2</a> &middot; <a href="../lessons/0003-implementing-era-boosting.html">Lesson 3</a> &middot; <a href="era-boosting-code.html">Code reference</a></span>
+  <span></span>
+</nav>
+
+</body>
+</html>

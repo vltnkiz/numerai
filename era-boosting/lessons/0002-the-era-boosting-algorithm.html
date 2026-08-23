@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 2 — The Era Boosting Algorithm</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<div class="kicker">Lesson 2 of Era Boosting</div>
+<h1>The Era Boosting Algorithm</h1>
+<p class="lede">Lesson 1 established the goal: stop optimizing for mean correlation alone, and optimize for stationarity too. Era boosting is richai's answer — a training-time change with no new math, just a change in <em>which rows get to teach the model</em>.</p>
+
+<div class="callout source">
+  <strong>Primary source:</strong> read
+  <a href="https://forum.numer.ai/t/era-boosted-models/189" target="_blank" rel="noopener">"Era Boosted Models"</a>
+  by richai on the Numerai forum before or after this lesson — everything here is grounded in it.
+</div>
+
+<h2>The idea in one sentence</h2>
+<p>
+  Ordinary gradient boosting adds each new tree to reduce error <em>everywhere</em>, weighted by how much data
+  sits where. Era boosting adds each new tree to reduce error only in the eras that are currently losing — so
+  the model can't keep ignoring its worst eras in favor of eras it already handles well.
+</p>
+
+<h2>The loop</h2>
+<p>Four steps, repeated <code>num_iters</code> times:</p>
+<div class="formula"><code>1. Build <em>trees_per_step</em> new trees on the training data currently in play.
+2. Score every era in the full training set separately (per-era Spearman correlation).
+3. Rank eras worst &rarr; best. Keep only the worst <em>proportion</em> of them (e.g. bottom 50%).
+4. Set "data currently in play" = those worst eras. Go to 1.</code></div>
+<p>
+  Round after round, the pool of eras a new tree is allowed to learn from shrinks down to whichever eras the
+  model is currently failing hardest. Each new batch of trees is a targeted correction, not another vote for
+  the eras that were already fine.
+</p>
+
+<h2>Walking it through on 6 eras</h2>
+<p>
+  Suppose <code>proportion=0.5</code>, <code>trees_per_step=1</code>, and after building tree 1 on all 6 eras
+  you score per-era correlation:
+</p>
+<div class="formula"><code>Era:   1     2     3     4     5     6
+Corr:  0.03  -0.01 0.05  -0.04 0.02  0.06</code></div>
+<p>
+  Ranked worst to best: 4 (&minus;0.04), 2 (&minus;0.01), 5 (0.02), 1 (0.03), 3 (0.05), 6 (0.06). With
+  <code>proportion=0.5</code>, keep the bottom half: <strong>eras 4, 2, 5</strong>. Tree 2 is built using only
+  rows from eras 4, 2, and 5 — eras 1, 3, and 6 sit this round out entirely, because the model doesn't need
+  help there yet.
+</p>
+<p>
+  Next round, all 6 eras get re-scored using the model as it now stands (tree 1 + tree 2 combined), and the
+  worst half is selected again — not necessarily the same three eras. An era that was struggling can graduate
+  out of the "worst half" once the targeted trees fix it, and a previously-fine era can drop in if it's now
+  comparatively weak.
+</p>
+
+<h2>Why this pushes toward stationarity, not just mean correlation</h2>
+<p>
+  A model trained the ordinary way has no mechanism that notices "these eras keep losing" — it just minimizes
+  overall error, and a handful of chronically bad eras barely move that average. Era boosting makes chronic
+  underperformance visible and directly targetable: an era that's <em>always</em> in the bottom half keeps
+  getting extra dedicated trees, round after round, until it either improves or the model runs out of rounds.
+  That's the direct link back to lesson 1 — this is a training procedure aimed at reducing the clumpy,
+  autocorrelated losses that plain mean-correlation training doesn't "see."
+</p>
+
+<h2>The reported result — and its caveat</h2>
+<p>
+  richai's post reports in-sample Sharpe rising from <strong>2.28 to 21.99</strong> over 200 trees
+  (<code>trees_per_step=10</code>, <code>num_iters=20</code>) using era boosting versus ordinary training. That's
+  a large number, and it comes with an explicit, important caveat stated in the original post: this was
+  <strong>in-sample</strong> — out-of-sample validation had not been done yet at the time of writing. A model can
+  look dramatically more stationary on the exact data it was fit to without that gain surviving on new eras. Keep
+  this caveat attached to the headline number whenever you cite it.
+</p>
+
+<h2>What era boosting is not</h2>
+<p>
+  It's a <em>training-time</em> technique — it changes what data each tree sees while the model is being built.
+  That's a different lever from <strong>feature neutralization</strong> (a post-processing technique applied to
+  an already-trained model's predictions, covered in the sibling workspace). The two aren't competitors; they
+  target overlapping problems from different points in the pipeline, and a model can use both.
+</p>
+
+<div class="quiz" id="quiz1">
+  <div class="q">Across two consecutive era boosting rounds, era 7 is in the "worst half" in round 1 but not round 2. What does that mean?</div>
+  <div class="choices">
+    <button class="choice" data-correct="false">Era 7 was dropped from the training set for good</button>
+    <button class="choice" data-correct="true">After round 1's targeted trees, era 7's score improved enough to rank above the cutoff in round 2's re-scoring</button>
+    <button class="choice" data-correct="false">Era 7's data was corrupted, so it was excluded from scoring</button>
+    <button class="choice" data-correct="false">proportion was changed between rounds</button>
+  </div>
+  <div class="feedback"></div>
+</div>
+
+<div class="numeric-check" id="check1">
+  <div class="prompt">8 eras, <code>proportion=0.25</code>. How many eras does the next batch of trees get built on?</div>
+  <input type="text" id="check1-input" placeholder="a number">
+  <button id="check1-btn">Check</button>
+  <div class="feedback"></div>
+</div>
+
+<footer class="ask-agent">
+  Something unclear — why re-scoring happens every round, how <code>proportion</code> interacts with
+  <code>trees_per_step</code>, or the in-sample/out-of-sample distinction — ask your teaching agent directly;
+  that's what it's here for.
+</footer>
+
+<nav class="lesson-links">
+  <span><a href="0001-what-is-performance-stationarity.html">&larr; Lesson 1</a> &middot; <a href="../reference/glossary.html">Glossary</a></span>
+  <span>Next: <a href="0003-implementing-era-boosting.html">Implementing Era Boosting</a> &rarr;</span>
+
+</nav>
+
+<script>
+(function() {
+  var quiz = document.getElementById('quiz1');
+  var buttons = quiz.querySelectorAll('button.choice');
+  var feedback = quiz.querySelector('.feedback');
+  var answered = false;
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (answered) return;
+      answered = true;
+      var correct = btn.getAttribute('data-correct') === 'true';
+      buttons.forEach(function(b) {
+        if (b.getAttribute('data-correct') === 'true') b.classList.add('correct');
+        else if (b === btn) b.classList.add('incorrect');
+      });
+      feedback.textContent = correct
+        ? 'Right. Eras aren\'t permanently in or out — every round re-scores all eras with the model as it currently stands, so an era can graduate out of the worst half once targeted trees have helped it.'
+        : 'Not quite. Every round re-scores all eras from scratch using the current model, then re-selects the worst proportion — era 7 simply scored better this time around, likely because round 1\'s trees targeted it.';
+      feedback.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+    });
+  });
+
+  var input = document.getElementById('check1-input');
+  var btn = document.getElementById('check1-btn');
+  function check() {
+    var val = input.value.trim();
+    var fb2 = document.querySelector('#check1 .feedback');
+    var correct = val === '2';
+    if (val === '') {
+      fb2.textContent = 'Enter a number.';
+      fb2.className = 'feedback incorrect';
+      return;
+    }
+    fb2.textContent = correct
+      ? 'Correct — 8 eras × 0.25 = 2. Only the worst 2 of the 8 eras feed the next batch of trees.'
+      : 'Not quite — proportion is applied to the era count: 8 × 0.25 = 2 eras kept for the next batch.';
+    fb2.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
+  }
+  btn.addEventListener('click', check);
+  input.addEventListener('keydown', function(e) { if (e.key === 'Enter') check(); });
+})();
+</script>
+
+</body>
+</html>
