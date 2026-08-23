@@ -52,11 +52,10 @@ def main() -> None:
         f"sharpe: {result.validation_score.sharpe:.4f}"
     )
     print(f"live predictions: {len(result.live_predictions)} rows")
-    for submission in result.submissions:
-        print(
-            f"submitted to {submission.model_name} ({submission.model_id}): "
-            f"submission_id={submission.submission_id}"
-        )
+    print(
+        f"submitted to {result.submission.model_name} ({result.submission.model_id}): "
+        f"submission_id={result.submission.submission_id}"
+    )
 
 
 if __name__ == "__main__":

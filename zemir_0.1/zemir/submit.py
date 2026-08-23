@@ -1,8 +1,11 @@
 """Submission stage: upload neutralized predictions directly to Numerai.
 
-Loops over every `name=model_id` pair in `NUMERAI_MODELS` (zemir_0.1/.env,
-extended over time via scripts/add_numerai_model.sh) rather than hardcoding a
-single model_id, submitting the same predictions to each in turn. Per
+Submits to exactly one named slot in `NUMERAI_MODELS` (zemir_0.1/.env,
+extended over time via scripts/add_numerai_model.sh) — per [Ensembling
+strategy](https://github.com/vltnkiz/numerai/issues/14) and [Prediction-to-
+slot routing](https://github.com/vltnkiz/numerai/issues/15), one run produces
+one combined prediction series for one Numerai model slot, not the same
+predictions fanned out to every slot `NUMERAI_MODELS` happens to hold. Per
 docs/research/live-round-data-and-submission.md: `upload_predictions` accepts
 a DataFrame directly (serialized via `to_csv(index=False)`, so `id` must be a
 column, not the index, or it's silently dropped) and has no `round_num`
@@ -56,16 +59,17 @@ def _submission_frame(
 def submit_predictions(
     predictions: pd.Series,
     *,
+    model_slot: str,
     napi: NumerAPI | None = None,
     models: dict[str, str] | None = None,
-) -> list[SubmissionResult]:
-    """Upload `predictions` (indexed by `id`) to every model in `NUMERAI_MODELS`.
+) -> SubmissionResult:
+    """Upload `predictions` (indexed by `id`) to the `model_slot` slot in `NUMERAI_MODELS`.
 
-    `predictions` is expected to already be neutralized live-round output.
-    Submits the identical frame to each model slot — Numerai scores each
-    model independently, so running several models "in parallel for
-    comparison" means each gets the same round's predictions from whichever
-    model produced them, not a per-model prediction set.
+    `predictions` is expected to already be neutralized live-round output —
+    one combined series for this run, submitted to exactly the one Numerai
+    model slot `model_slot` names. `models` holding other slots (e.g. future
+    models run in parallel for comparison) are left untouched; picking which
+    slot a given run targets is `model_slot`'s job, not a fan-out here.
     """
     load_dotenv()
     napi = napi or NumerAPI(
@@ -73,13 +77,13 @@ def submit_predictions(
         secret_key=os.environ["NUMERAI_SECRET_KEY"],
     )
     models = models if models is not None else load_numerai_models()
+    if model_slot not in models:
+        raise ValueError(
+            f"model slot {model_slot!r} not found in NUMERAI_MODELS "
+            f"(have: {sorted(models)})"
+        )
 
     frame = _submission_frame(predictions)
-
-    results = []
-    for name, model_id in models.items():
-        submission_id = napi.upload_predictions(df=frame, model_id=model_id)
-        results.append(
-            SubmissionResult(model_name=name, model_id=model_id, submission_id=submission_id)
-        )
-    return results
+    model_id = models[model_slot]
+    submission_id = napi.upload_predictions(df=frame, model_id=model_id)
+    return SubmissionResult(model_name=model_slot, model_id=model_id, submission_id=submission_id)

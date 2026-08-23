@@ -62,3 +62,4 @@ class RunConfig:
     era_boost: EraBoostConfig | None = None
     neutralization: NeutralizationConfig = field(default_factory=NeutralizationConfig)
     min_validation_mean_corr: float = 0.0
+    submission_model_slot: str = "zemir_01"

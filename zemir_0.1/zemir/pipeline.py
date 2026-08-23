@@ -60,7 +60,7 @@ class PipelineResult:
     validation_score: ValidationScore
     live_predictions: pd.Series
     live_predictions_neutralized: pd.Series
-    submissions: list[SubmissionResult]
+    submission: SubmissionResult
 
 
 def _run_dir(run_id: str) -> Path:
@@ -123,8 +123,11 @@ def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
         run_dir / "live_predictions_neutralized.csv"
     )
 
-    submissions = submit_predictions(live_predictions_neutralized.rename("prediction"))
-    _write_submissions(run_dir, submissions)
+    submission = submit_predictions(
+        live_predictions_neutralized.rename("prediction"),
+        model_slot=config.submission_model_slot,
+    )
+    _write_submission(run_dir, submission)
 
     return PipelineResult(
         run_id=config.run_id,
@@ -132,7 +135,7 @@ def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
         validation_score=validation_score,
         live_predictions=live_predictions,
         live_predictions_neutralized=live_predictions_neutralized,
-        submissions=submissions,
+        submission=submission,
     )
 
 
@@ -184,17 +187,14 @@ def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
     score.era_corr.to_csv(run_dir / f"{prefix}validation_era_corr.csv", header=["corr"])
 
 
-def _write_submissions(run_dir: Path, submissions: list[SubmissionResult]) -> None:
-    (run_dir / "submissions.json").write_text(
+def _write_submission(run_dir: Path, submission: SubmissionResult) -> None:
+    (run_dir / "submission.json").write_text(
         json.dumps(
-            [
-                {
-                    "model_name": s.model_name,
-                    "model_id": s.model_id,
-                    "submission_id": s.submission_id,
-                }
-                for s in submissions
-            ],
+            {
+                "model_name": submission.model_name,
+                "model_id": submission.model_id,
+                "submission_id": submission.submission_id,
+            },
             indent=2,
         )
     )
