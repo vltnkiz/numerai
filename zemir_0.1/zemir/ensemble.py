@@ -2,7 +2,7 @@
 
 Per docs/adr/0001-zemir-pipeline-architecture.md, `Model.predict()` is kept
 pure/stateless specifically so combining predictions needs no `Model`
-protocol changes — just this pipeline-level weighted average.
+protocol changes — just this pipeline-level rank average.
 """
 
 from __future__ import annotations
@@ -10,23 +10,14 @@ from __future__ import annotations
 import pandas as pd
 
 
-def combine_predictions(
-    predictions: dict[str, pd.Series], weights: dict[str, float]
-) -> pd.Series:
-    """Weighted average of each named model's predictions.
+def combine_predictions(predictions: dict[str, pd.Series], era: pd.Series) -> pd.Series:
+    """Equal-weight average of each named model's predictions, ranked per era first.
 
-    `weights` are normalized to sum to 1 first, so callers can pass either
-    proportions (0.3/0.7) or arbitrary ratios (30/70) — same result either
-    way. `predictions` and `weights` must name the same set of models.
+    Ranking (percentile, within each era) before averaging makes the result
+    robust to different prediction scales/distributions across model types —
+    a plain average of raw scores would let whichever model happens to
+    produce a wider spread dominate.
     """
-    if predictions.keys() != weights.keys():
-        raise ValueError(
-            f"predictions and weights must name the same models: "
-            f"{sorted(predictions)} vs {sorted(weights)}"
-        )
-
-    total_weight = sum(weights.values())
-    combined = sum(
-        predictions[name] * (weight / total_weight) for name, weight in weights.items()
-    )
+    ranked = {name: preds.groupby(era).rank(pct=True) for name, preds in predictions.items()}
+    combined = sum(ranked.values()) / len(ranked)
     return combined.rename("prediction")

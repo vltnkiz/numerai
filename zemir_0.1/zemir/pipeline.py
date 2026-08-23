@@ -7,8 +7,11 @@ persisted under `runs/<run_id>/` here, as the side effect the ADR calls for.
 `models` is a name -> Model mapping rather than a single model so more than
 one model type can run in the same invocation and have their predictions
 combined (zemir/ensemble.py) — [Ensembling strategy]
-(https://github.com/vltnkiz/numerai/issues/14). A single-model run is just
-`models` with one entry and no `RunConfig.ensemble` needed.
+(https://github.com/vltnkiz/numerai/issues/14): an equal-weight, per-era
+rank average, submitted as one series to zemir_01. A single-model run
+(`models` with one entry) skips combination entirely and submits that
+model's raw predictions unchanged — ranking a lone model's predictions
+would alter what feature neutralization sees for no benefit.
 
 Submission is gated on the *combined* validation score — the threshold/
 hard-stop decision docs/decisions #7 left open for ticket #10: if
@@ -33,7 +36,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from zemir.config import EnsembleConfig, RunConfig
+from zemir.config import RunConfig
 from zemir.download import download
 from zemir.ensemble import combine_predictions
 from zemir.metrics import ValidationScore, score_validation
@@ -66,24 +69,6 @@ def _run_dir(run_id: str) -> Path:
     return d
 
 
-def _resolve_weights(
-    ensemble_config: EnsembleConfig | None, models: dict[str, Model]
-) -> dict[str, float]:
-    if len(models) == 1:
-        return {next(iter(models)): 1.0}
-    if ensemble_config is None:
-        raise ValueError(
-            f"multiple models given ({sorted(models)}) but RunConfig.ensemble is "
-            "None — set ensemble weights for each model"
-        )
-    if models.keys() != ensemble_config.weights.keys():
-        raise ValueError(
-            f"RunConfig.ensemble.weights {sorted(ensemble_config.weights)} must "
-            f"name the same models as `models` {sorted(models)}"
-        )
-    return ensemble_config.weights
-
-
 def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
     """Run one end-to-end pipeline invocation: download, train, ensemble, neutralize, submit.
 
@@ -91,7 +76,6 @@ def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
     identical whether it's running one model or combining several.
     """
     run_dir = _run_dir(config.run_id)
-    weights = _resolve_weights(config.ensemble, models)
 
     download_result = download(config.data_version, feature_set=config.features.feature_set)
     feature_columns = download_result.feature_sets[config.features.feature_set]
@@ -105,7 +89,7 @@ def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
     }
     _write_validation_scores(run_dir, train_results)
 
-    validation_score = _combined_validation_score(download_result.validation, train_results, weights)
+    validation_score = _combined_validation_score(download_result.validation, train_results)
     _write_combined_validation_score(run_dir, validation_score)
 
     if validation_score.mean_corr < config.min_validation_mean_corr:
@@ -123,7 +107,11 @@ def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
         )
         for name, model in models.items()
     }
-    live_predictions = combine_predictions(live_predictions_by_model, weights)
+    live_predictions = (
+        next(iter(live_predictions_by_model.values()))
+        if len(live_predictions_by_model) == 1
+        else combine_predictions(live_predictions_by_model, download_result.live["era"])
+    )
     live_predictions.to_frame().to_csv(run_dir / "live_predictions.csv")
 
     live_for_neutralization = download_result.live[["era"] + neutralizers].copy()
@@ -151,7 +139,6 @@ def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
 def _combined_validation_score(
     validation_df: pd.DataFrame,
     train_results: dict[str, TrainResult],
-    weights: dict[str, float],
     *,
     target_col: str = "target",
     era_col: str = "era",
@@ -159,7 +146,11 @@ def _combined_validation_score(
     validation_predictions = {
         name: tr.validation_predictions for name, tr in train_results.items()
     }
-    combined_predictions = combine_predictions(validation_predictions, weights)
+    combined_predictions = (
+        next(iter(validation_predictions.values()))
+        if len(validation_predictions) == 1
+        else combine_predictions(validation_predictions, validation_df[era_col])
+    )
 
     validation_df = validation_df.dropna(subset=[target_col])
     scored = validation_df[[era_col, target_col]].copy()
