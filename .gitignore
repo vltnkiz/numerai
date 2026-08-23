@@ -2,7 +2,7 @@
 datasets/
 
 # Cloned numerai example-scripts repo (has its own git history, not our research)
-example-scripts/
+research/example-scripts/
 
 # Data files anywhere
 *.parquet
@@ -22,11 +22,11 @@ __pycache__/
 .claude/
 .agents/
 
-# Numerai API credentials (per zemir_0.1/.env.example)
-zemir_0.1/.env
+# Numerai API credentials (per prod/zemir_0.1/.env.example)
+prod/zemir_0.1/.env
 
 # Pipeline run artifacts (per docs/adr/0001-zemir-pipeline-architecture.md)
-zemir_0.1/runs/
+prod/zemir_0.1/runs/
 
 # Editor / OS
 .DS_Store

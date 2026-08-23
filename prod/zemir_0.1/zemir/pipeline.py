@@ -46,8 +46,8 @@ from zemir.neutralize import neutralize_predictions
 from zemir.submit import SubmissionResult, submit_predictions
 from zemir.train import TrainResult, train_and_validate
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNS_DIR = REPO_ROOT / "zemir_0.1" / "runs"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+RUNS_DIR = REPO_ROOT / "prod" / "zemir_0.1" / "runs"
 
 
 class ValidationScoreBelowThreshold(RuntimeError):
