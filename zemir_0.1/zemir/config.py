@@ -29,11 +29,22 @@ class FeatureConfig:
 
 @dataclass
 class EraBoostConfig:
-    """Placeholder for era-boosted XGBoost's hyperparameters.
+    """Era-boosted XGBoost's hyperparameters, per era_boost_train_with_history in
+    era-boosting/code/era_boosting.ipynb.
 
-    Left unpopulated until ticket #12 (second model integration) gives it a
-    real shape; `RunConfig.era_boost` stays `None` for linear-regression runs.
+    Passed to `zemir.models.era_boost.EraBoostModel` at construction (per
+    docs/adr/0001-zemir-pipeline-architecture.md: config isn't owned by the
+    `Model` instance, but the model still needs it to configure itself).
+    `RunConfig.era_boost` stays `None` for linear-regression runs.
     """
+
+    trees_per_step: int = 50
+    num_iters: int = 40
+    snapshot_every: int = 5
+    proportion: float = 0.5
+    learning_rate: float = 0.01
+    max_depth: int = 5
+    colsample_bytree: float = 0.1
 
 
 @dataclass
