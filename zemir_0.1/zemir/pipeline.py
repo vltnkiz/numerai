@@ -1,14 +1,19 @@
-"""Pipeline entrypoint: wire download -> train -> neutralize -> submit together.
+"""Pipeline entrypoint: wire download -> train -> ensemble -> neutralize -> submit.
 
 Stages exchange data as in-memory DataFrames within this one process, per
 docs/adr/0001-zemir-pipeline-architecture.md; each stage's own output is also
 persisted under `runs/<run_id>/` here, as the side effect the ADR calls for.
 
-Submission is gated on the validation score computed by the training stage
-(`zemir/train.py`) — the threshold/hard-stop decision docs/decisions #7 left
-open for this ticket: if `validation_score.mean_corr` falls below
-`RunConfig.min_validation_mean_corr`, the run stops before neutralizing or
-submitting anything.
+`models` is a name -> Model mapping rather than a single model so more than
+one model type can run in the same invocation and have their predictions
+combined (zemir/ensemble.py) — [Ensembling strategy]
+(https://github.com/vltnkiz/numerai/issues/14). A single-model run is just
+`models` with one entry and no `RunConfig.ensemble` needed.
+
+Submission is gated on the *combined* validation score — the threshold/
+hard-stop decision docs/decisions #7 left open for ticket #10: if
+`validation_score.mean_corr` falls below `RunConfig.min_validation_mean_corr`,
+the run stops before neutralizing or submitting anything.
 
 No separate round-open gate: ticket #10 found `NumerAPI.check_round_open()`
 reported the round closed on a run where `upload_predictions` nonetheless
@@ -28,8 +33,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from zemir.config import RunConfig
+from zemir.config import EnsembleConfig, RunConfig
 from zemir.download import download
+from zemir.ensemble import combine_predictions
+from zemir.metrics import ValidationScore, score_validation
 from zemir.models.base import Model
 from zemir.neutralize import neutralize_predictions
 from zemir.submit import SubmissionResult, submit_predictions
@@ -46,7 +53,8 @@ class ValidationScoreBelowThreshold(RuntimeError):
 @dataclass
 class PipelineResult:
     run_id: str
-    train_result: TrainResult
+    train_results: dict[str, TrainResult]
+    validation_score: ValidationScore
     live_predictions: pd.Series
     live_predictions_neutralized: pd.Series
     submissions: list[SubmissionResult]
@@ -58,35 +66,64 @@ def _run_dir(run_id: str) -> Path:
     return d
 
 
-def run_pipeline(config: RunConfig, model: Model) -> PipelineResult:
-    """Run one end-to-end pipeline invocation: download, train, neutralize, submit.
+def _resolve_weights(
+    ensemble_config: EnsembleConfig | None, models: dict[str, Model]
+) -> dict[str, float]:
+    if len(models) == 1:
+        return {next(iter(models)): 1.0}
+    if ensemble_config is None:
+        raise ValueError(
+            f"multiple models given ({sorted(models)}) but RunConfig.ensemble is "
+            "None — set ensemble weights for each model"
+        )
+    if models.keys() != ensemble_config.weights.keys():
+        raise ValueError(
+            f"RunConfig.ensemble.weights {sorted(ensemble_config.weights)} must "
+            f"name the same models as `models` {sorted(models)}"
+        )
+    return ensemble_config.weights
 
-    `model` is caller-supplied (per docs/adr/0001) so this function is
-    identical for linear regression and, later, era-boosted XGBoost.
+
+def run_pipeline(config: RunConfig, models: dict[str, Model]) -> PipelineResult:
+    """Run one end-to-end pipeline invocation: download, train, ensemble, neutralize, submit.
+
+    `models` is caller-supplied (per docs/adr/0001) so this function is
+    identical whether it's running one model or combining several.
     """
     run_dir = _run_dir(config.run_id)
+    weights = _resolve_weights(config.ensemble, models)
 
     download_result = download(config.data_version, feature_set=config.features.feature_set)
     feature_columns = download_result.feature_sets[config.features.feature_set]
     neutralizers = config.features.neutralizers or feature_columns
 
-    train_result = train_and_validate(
-        model, download_result.train, download_result.validation, feature_columns
-    )
-    _write_validation_score(run_dir, train_result)
+    train_results = {
+        name: train_and_validate(
+            model, download_result.train, download_result.validation, feature_columns
+        )
+        for name, model in models.items()
+    }
+    _write_validation_scores(run_dir, train_results)
 
-    if train_result.validation_score.mean_corr < config.min_validation_mean_corr:
+    validation_score = _combined_validation_score(download_result.validation, train_results, weights)
+    _write_combined_validation_score(run_dir, validation_score)
+
+    if validation_score.mean_corr < config.min_validation_mean_corr:
         raise ValidationScoreBelowThreshold(
-            f"validation mean_corr {train_result.validation_score.mean_corr:.4f} < "
+            f"validation mean_corr {validation_score.mean_corr:.4f} < "
             f"min_validation_mean_corr {config.min_validation_mean_corr:.4f} — "
             "stopping before neutralization/submission"
         )
 
-    live_predictions = pd.Series(
-        model.predict(download_result.live[feature_columns]),
-        index=download_result.live.index,
-        name="prediction",
-    )
+    live_predictions_by_model = {
+        name: pd.Series(
+            model.predict(download_result.live[feature_columns]),
+            index=download_result.live.index,
+            name="prediction",
+        )
+        for name, model in models.items()
+    }
+    live_predictions = combine_predictions(live_predictions_by_model, weights)
     live_predictions.to_frame().to_csv(run_dir / "live_predictions.csv")
 
     live_for_neutralization = download_result.live[["era"] + neutralizers].copy()
@@ -103,16 +140,46 @@ def run_pipeline(config: RunConfig, model: Model) -> PipelineResult:
 
     return PipelineResult(
         run_id=config.run_id,
-        train_result=train_result,
+        train_results=train_results,
+        validation_score=validation_score,
         live_predictions=live_predictions,
         live_predictions_neutralized=live_predictions_neutralized,
         submissions=submissions,
     )
 
 
-def _write_validation_score(run_dir: Path, train_result: TrainResult) -> None:
-    score = train_result.validation_score
-    (run_dir / "validation_score.json").write_text(
+def _combined_validation_score(
+    validation_df: pd.DataFrame,
+    train_results: dict[str, TrainResult],
+    weights: dict[str, float],
+    *,
+    target_col: str = "target",
+    era_col: str = "era",
+) -> ValidationScore:
+    validation_predictions = {
+        name: tr.validation_predictions for name, tr in train_results.items()
+    }
+    combined_predictions = combine_predictions(validation_predictions, weights)
+
+    validation_df = validation_df.dropna(subset=[target_col])
+    scored = validation_df[[era_col, target_col]].copy()
+    scored["prediction"] = combined_predictions
+    return score_validation(
+        scored, target_col=target_col, prediction_col="prediction", era_col=era_col
+    )
+
+
+def _write_validation_scores(run_dir: Path, train_results: dict[str, TrainResult]) -> None:
+    for name, train_result in train_results.items():
+        _write_score(run_dir, train_result.validation_score, prefix=f"{name}_")
+
+
+def _write_combined_validation_score(run_dir: Path, validation_score: ValidationScore) -> None:
+    _write_score(run_dir, validation_score, prefix="")
+
+
+def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
+    (run_dir / f"{prefix}validation_score.json").write_text(
         json.dumps(
             {
                 "mean_corr": score.mean_corr,
@@ -123,7 +190,7 @@ def _write_validation_score(run_dir: Path, train_result: TrainResult) -> None:
             indent=2,
         )
     )
-    score.era_corr.to_csv(run_dir / "validation_era_corr.csv", header=["corr"])
+    score.era_corr.to_csv(run_dir / f"{prefix}validation_era_corr.csv", header=["corr"])
 
 
 def _write_submissions(run_dir: Path, submissions: list[SubmissionResult]) -> None:

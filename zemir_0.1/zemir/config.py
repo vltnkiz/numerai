@@ -53,6 +53,21 @@ class NeutralizationConfig:
 
 
 @dataclass
+class EnsembleConfig:
+    """Per-model weights for combining predictions (zemir/ensemble.py).
+
+    Keys must match the model names passed to `run_pipeline`'s `models` dict.
+    Weights are normalized to sum to 1, so `{"linear": 30, "era_boost": 70}`
+    and `{"linear": 0.3, "era_boost": 0.7}` are equivalent. `None` on
+    `RunConfig` means a single model, no combination needed.
+    """
+
+    weights: dict[str, float] = field(
+        default_factory=lambda: {"linear": 0.3, "era_boost": 0.7}
+    )
+
+
+@dataclass
 class RunConfig:
     data_version: str = "5.0"
     run_id: str = field(
@@ -61,4 +76,5 @@ class RunConfig:
     features: FeatureConfig = field(default_factory=FeatureConfig)
     era_boost: EraBoostConfig | None = None
     neutralization: NeutralizationConfig = field(default_factory=NeutralizationConfig)
+    ensemble: EnsembleConfig | None = None
     min_validation_mean_corr: float = 0.0
