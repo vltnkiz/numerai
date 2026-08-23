@@ -1,0 +1,20 @@
+[project]
+name = "zemir"
+version = "0.1.0"
+description = "Numerai Classic tournament pipeline: download, train, neutralize, submit."
+requires-python = ">=3.11"
+dependencies = [
+    "numerapi>=3.1.1,<4",
+    "pandas>=3.0.5,<4",
+    "numpy>=2.4.6,<3",
+    "scikit-learn>=1.9.0,<2",
+    "xgboost>=3.2.0,<4",
+    "python-dotenv>=1.0,<2",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["zemir*"]

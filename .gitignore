@@ -22,10 +22,17 @@ __pycache__/
 jupyter.log
 .jupyter/
 JUPYTER.md
+.jupyter_ystore.db
 
 # Local machine-specific settings and installed skill libraries (tooling, not research)
 .claude/
 .agents/
+
+# Numerai API credentials (per zemir_0.1/.env.example)
+zemir_0.1/.env
+
+# Pipeline run artifacts (per docs/adr/0001-zemir-pipeline-architecture.md)
+zemir_0.1/runs/
 
 # Editor / OS
 .DS_Store
