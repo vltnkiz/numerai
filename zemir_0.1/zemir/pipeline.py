@@ -9,6 +9,15 @@ Submission is gated on the validation score computed by the training stage
 open for this ticket: if `validation_score.mean_corr` falls below
 `RunConfig.min_validation_mean_corr`, the run stops before neutralizing or
 submitting anything.
+
+No separate round-open gate: ticket #10 found `NumerAPI.check_round_open()`
+reported the round closed on a run where `upload_predictions` nonetheless
+succeeded, so it's not a reliable pre-check. Instead, ticket #11's scheduled
+GitHub Actions job fires generously across Numerai's Tuesday-Saturday window
+(docs/research/live-round-data-and-submission.md) and simply lets this
+function run every time — a genuinely closed round is expected to surface as
+a failed run via whatever exception `submit_predictions` raises, not a
+silent no-op here.
 """
 
 from __future__ import annotations

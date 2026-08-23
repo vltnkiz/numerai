@@ -1,0 +1,35 @@
+name: Weekly zemir pipeline
+
+# Numerai Classic releases new live features and accepts submissions
+# Tuesday-Saturday (docs/research/live-round-data-and-submission.md), but no
+# exact open/close wall-clock time is a documented constant, so this fires
+# once daily, generously across that whole window, rather than at one
+# precisely-timed slot. zemir/pipeline.py has no separate round-open gate
+# (see its module docstring) — a day with nothing to submit is expected to
+# surface as a failed run here, not a silent skip.
+on:
+  schedule:
+    - cron: "0 14 * * 2-6"
+  workflow_dispatch: {}
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install zemir
+        run: pip install -e ./zemir_0.1
+
+      - name: Run pipeline
+        working-directory: zemir_0.1
+        env:
+          NUMERAI_PUBLIC_ID: ${{ secrets.NUMERAI_PUBLIC_ID }}
+          NUMERAI_SECRET_KEY: ${{ secrets.NUMERAI_SECRET_KEY }}
+          NUMERAI_MODELS: ${{ secrets.NUMERAI_MODELS }}
+        run: python scripts/run_pipeline.py
