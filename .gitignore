@@ -1,4 +1,4 @@
-# Datasets (large, downloadable via download_data.py)
+# Datasets (large, downloaded on demand by zemir/data.py)
 datasets/
 
 # Cloned numerai example-scripts repo (has its own git history, not our research)
