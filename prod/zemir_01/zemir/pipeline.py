@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
 from numerapi import NumerAPI
 
+from zemir.config import PipelineConfig
 from zemir.data import download
+from zemir.models import Trainer
 from zemir.scoring import (
     ValidationScore,
     neutralize_predictions,
@@ -21,8 +22,6 @@ from zemir.scoring import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
-
-Trainer = Callable[[pd.DataFrame, pd.Series, pd.Series], object]
 
 
 class ValidationScoreBelowThreshold(RuntimeError):
@@ -39,11 +38,11 @@ class SubmissionResult:
 @dataclass
 class PipelineResult:
     run_id: str
+    run_dir: Path
     validation_scores: dict[str, ValidationScore]
     combined_validation_score: ValidationScore
     live_predictions: pd.Series
     live_predictions_neutralized: pd.Series
-    submission: SubmissionResult
 
 
 def _combine_predictions(predictions: dict[str, pd.Series], era: pd.Series) -> pd.Series:
@@ -71,9 +70,20 @@ def _load_numerai_models(env: dict[str, str] | None = None) -> dict[str, str]:
     return models
 
 
-def _submit_predictions(
-    predictions: pd.Series, *, model_slot: str, napi: NumerAPI | None = None
+def submit_predictions(
+    predictions: pd.Series,
+    *,
+    model_slot: str,
+    run_dir: Path,
+    napi: NumerAPI | None = None,
 ) -> SubmissionResult:
+    """Upload predictions to Numerai. THE ONLY FUNCTION IN THIS PACKAGE THAT SUBMITS.
+
+    Deliberately not called by `run_pipeline`: an experiment that imports the
+    pipeline cannot fire a live submission by forgetting a flag. Only
+    scripts/run_pipeline.py — the entrypoint the scheduled workflow invokes —
+    calls this.
+    """
     load_dotenv()
     napi = napi or NumerAPI(
         public_id=os.environ["NUMERAI_PUBLIC_ID"],
@@ -89,29 +99,50 @@ def _submit_predictions(
     frame = frame.rename(columns={frame.columns[0]: "id"})[["id", "prediction"]]
     model_id = models[model_slot]
     submission_id = napi.upload_predictions(df=frame, model_id=model_id)
-    return SubmissionResult(model_name=model_slot, model_id=model_id, submission_id=submission_id)
+    submission = SubmissionResult(
+        model_name=model_slot, model_id=model_id, submission_id=submission_id
+    )
+    (run_dir / "submission.json").write_text(
+        json.dumps(
+            {
+                "model_name": submission.model_name,
+                "model_id": submission.model_id,
+                "submission_id": submission.submission_id,
+            },
+            indent=2,
+        )
+    )
+    return submission
 
 
 def run_pipeline(
+    config: PipelineConfig,
     *,
     run_id: str,
-    data_version: str,
-    feature_set: str,
-    neutralization_proportion: float,
-    min_validation_mean_corr: float,
-    submission_model_slot: str,
     trainers: dict[str, Trainer],
     neutralizers: list[str] | None = None,
+    runs_dir: Path = RUNS_DIR,
 ) -> PipelineResult:
-    run_dir = RUNS_DIR / run_id
+    """Train, score, predict, neutralize and write artifacts.
+
+    Never submits and never gates: submission is a separate step
+    (`submit_predictions`), and the validation-score gate that guards it lives
+    with it in scripts/run_pipeline.py.
+    """
+    run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = download(data_version, feature_set)
+    dataset = download(config.data_version, config.feature_set)
     feature_columns = dataset.feature_columns
     neutralizers = neutralizers or feature_columns
 
     train_df = dataset.train.dropna(subset=["target"])
     validation_df = dataset.validation.dropna(subset=["target"])
+    if config.max_eras is not None:
+        train_df = _last_eras(train_df, config.max_eras)
+        validation_df = _last_eras(validation_df, config.max_eras)
+
+    _write_run_config(run_dir, config, trainers=trainers, neutralizers=neutralizers)
 
     fitted_models = {
         name: trainer(train_df[feature_columns], train_df["target"], train_df["era"])
@@ -145,13 +176,6 @@ def run_pipeline(
     )
     _write_score(run_dir, combined_validation_score, prefix="")
 
-    if combined_validation_score.mean_corr < min_validation_mean_corr:
-        raise ValidationScoreBelowThreshold(
-            f"validation mean_corr {combined_validation_score.mean_corr:.4f} < "
-            f"min_validation_mean_corr {min_validation_mean_corr:.4f} — "
-            "stopping before neutralization/submission"
-        )
-
     live_predictions_by_model = {
         name: pd.Series(
             model.predict(dataset.live[feature_columns]),
@@ -170,35 +194,47 @@ def run_pipeline(
     live_for_neutralization = dataset.live[["era"] + neutralizers].copy()
     live_for_neutralization["prediction"] = live_predictions
     live_predictions_neutralized = neutralize_predictions(
-        live_for_neutralization, neutralizers, neutralization_proportion
+        live_for_neutralization, neutralizers, config.neutralization_proportion
     )
     live_predictions_neutralized = rank_normalize(live_predictions_neutralized)
     live_predictions_neutralized.to_frame().to_csv(run_dir / "live_predictions_neutralized.csv")
 
     validate_predictions(live_predictions_neutralized, dataset.live["era"])
 
-    submission = _submit_predictions(
-        live_predictions_neutralized.rename("prediction"), model_slot=submission_model_slot
-    )
-    (run_dir / "submission.json").write_text(
-        json.dumps(
-            {
-                "model_name": submission.model_name,
-                "model_id": submission.model_id,
-                "submission_id": submission.submission_id,
-            },
-            indent=2,
-        )
-    )
-
     return PipelineResult(
         run_id=run_id,
+        run_dir=run_dir,
         validation_scores=validation_scores,
         combined_validation_score=combined_validation_score,
         live_predictions=live_predictions,
         live_predictions_neutralized=live_predictions_neutralized,
-        submission=submission,
     )
+
+
+def _write_run_config(
+    run_dir: Path,
+    config: PipelineConfig,
+    *,
+    trainers: dict[str, Trainer],
+    neutralizers: list[str] | None,
+) -> None:
+    """Record what produced this run's scores, so a comparison is attributable."""
+    (run_dir / "config.json").write_text(
+        json.dumps(
+            {
+                **asdict(config),
+                "models": sorted(trainers),
+                "neutralizer_count": len(neutralizers) if neutralizers else 0,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def _last_eras(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    eras = sorted(df["era"].unique(), key=int)[-n:]
+    return df[df["era"].isin(eras)]
 
 
 def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:

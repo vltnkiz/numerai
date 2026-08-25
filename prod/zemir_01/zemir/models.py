@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
+
+# (features, target, era) -> a fitted object exposing .predict(features)
+Trainer = Callable[[pd.DataFrame, pd.Series, pd.Series], object]
 
 
 def train_linear(X: pd.DataFrame, y: pd.Series) -> LinearRegression:

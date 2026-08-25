@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""CLI entrypoint: run one end-to-end zemir pipeline invocation.
+"""LIVE entrypoint: run the pipeline, check the gate, AND SUBMIT.
+
+Every invocation uploads to SUBMISSION_MODEL_SLOT, overwriting the round's real
+submission. To measure without submitting, use scripts/run_experiment.py.
 
 Usage:
   python scripts/run_pipeline.py --model linear
-  python scripts/run_pipeline.py --model era_boost
-  python scripts/run_pipeline.py --model ensemble
 """
 
 from __future__ import annotations
@@ -12,50 +13,26 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
-from zemir.models import train_linear, train_xgboost
-from zemir.pipeline import Trainer, run_pipeline
-
-DATA_VERSION = "5.0"
-FEATURE_SET = "small"
-NEUTRALIZATION_PROPORTION = 0.5
-MIN_VALIDATION_MEAN_CORR = 0.0
-SUBMISSION_MODEL_SLOT = "zemir_01"
-
-XGBOOST_HYPERPARAMS = dict(
-    trees_per_step=50,
-    num_iters=40,
-    proportion=0.5,
-    learning_rate=0.01,
-    max_depth=5,
-    colsample_bytree=0.1,
+from zemir.config import (
+    LIVE,
+    MIN_VALIDATION_MEAN_CORR,
+    MODEL_NAMES,
+    SUBMISSION_MODEL_SLOT,
+    build_trainers,
 )
-
-TRAINERS: dict[str, dict[str, Trainer]] = {
-    "linear": {"linear": lambda X, y, era: train_linear(X, y)},
-    "era_boost": {
-        "era_boost": lambda X, y, era: train_xgboost(X, y, era, **XGBOOST_HYPERPARAMS)
-    },
-    "ensemble": {
-        "linear": lambda X, y, era: train_linear(X, y),
-        "era_boost": lambda X, y, era: train_xgboost(X, y, era, **XGBOOST_HYPERPARAMS),
-    },
-}
+from zemir.pipeline import ValidationScoreBelowThreshold, run_pipeline, submit_predictions
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=list(TRAINERS), default="linear")
+    parser.add_argument("--model", choices=MODEL_NAMES, default="linear")
     args = parser.parse_args()
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     result = run_pipeline(
+        LIVE,
         run_id=run_id,
-        data_version=DATA_VERSION,
-        feature_set=FEATURE_SET,
-        neutralization_proportion=NEUTRALIZATION_PROPORTION,
-        min_validation_mean_corr=MIN_VALIDATION_MEAN_CORR,
-        submission_model_slot=SUBMISSION_MODEL_SLOT,
-        trainers=TRAINERS[args.model],
+        trainers=build_trainers(args.model, LIVE),
     )
 
     print(f"run_id: {result.run_id}")
@@ -66,9 +43,23 @@ def main() -> None:
         f"sharpe: {result.combined_validation_score.sharpe:.4f}"
     )
     print(f"live predictions: {len(result.live_predictions)} rows")
+
+    # The gate guards submission, so it sits with submission — not inside the
+    # pipeline, which cannot submit and so has nothing to stop.
+    if result.combined_validation_score.mean_corr < MIN_VALIDATION_MEAN_CORR:
+        raise ValidationScoreBelowThreshold(
+            f"validation mean_corr {result.combined_validation_score.mean_corr:.4f} < "
+            f"MIN_VALIDATION_MEAN_CORR {MIN_VALIDATION_MEAN_CORR:.4f} — not submitting"
+        )
+
+    submission = submit_predictions(
+        result.live_predictions_neutralized.rename("prediction"),
+        model_slot=SUBMISSION_MODEL_SLOT,
+        run_dir=result.run_dir,
+    )
     print(
-        f"submitted to {result.submission.model_name} ({result.submission.model_id}): "
-        f"submission_id={result.submission.submission_id}"
+        f"submitted to {submission.model_name} ({submission.model_id}): "
+        f"submission_id={submission.submission_id}"
     )
 
 
