@@ -72,3 +72,44 @@ def build_trainers(model: str, config: PipelineConfig) -> dict[str, Trainer]:
     if model not in by_name:
         raise ValueError(f"unknown model {model!r} (have: {MODEL_NAMES})")
     return by_name[model]
+
+
+@dataclass(frozen=True)
+class ScoringConfig:
+    """One row of the comparison table: what to score, downstream of a fit.
+
+    Separate from `PipelineConfig` because it names a different stage. A
+    `PipelineConfig` describes a *fit* — an hour of training, recorded once in
+    the harness cache's `fit_config.json` and immutable thereafter. A
+    `ScoringConfig` describes what is done to those cached predictions, costs
+    seconds, and is swept many times against one fit.
+
+    Flat, like `PipelineConfig`: `proportion = 0.0` *is* "no neutralization"
+    (the correction term is exactly zero), so there is no separate on/off field.
+    """
+
+    name: str
+    models: tuple[str, ...]
+    neutralization_proportion: float = 0.0
+
+
+def scoring_sweep(
+    model_sets: tuple[tuple[str, ...], ...] = (
+        ("linear",),
+        ("era_boost",),
+        ("linear", "era_boost"),
+    ),
+    proportions: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
+) -> list[ScoringConfig]:
+    """Every combination of models and neutralization proportion, named `<models>_p<prop>`."""
+    return [
+        ScoringConfig(f"{'+'.join(models)}_p{proportion:g}", models, proportion)
+        for models in model_sets
+        for proportion in proportions
+    ]
+
+
+# Today's live submission — linear only, neutralized at 0.5. The row every later
+# comparison on this map is measured against; a member of `scoring_sweep()`, not
+# a duplicate of one.
+PRODUCTION_BASELINE = "linear_p0.5"

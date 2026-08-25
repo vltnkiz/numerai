@@ -5,6 +5,8 @@ description = "Numerai Classic tournament pipeline: download, train, neutralize,
 requires-python = ">=3.11"
 dependencies = [
     "numerapi>=3.1.1,<4",
+    # Numerai's reference implementation of the paid metrics, used by zemir/scoring.py
+    "numerai-tools>=0.6.0,<1",
     "pandas>=3.0.5,<4",
     "pyarrow>=25.0.1,<26",
     "numpy>=2.4.6,<3",

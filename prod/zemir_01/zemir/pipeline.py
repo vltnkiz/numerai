@@ -45,8 +45,16 @@ class PipelineResult:
     live_predictions_neutralized: pd.Series
 
 
-def _combine_predictions(predictions: dict[str, pd.Series], era: pd.Series) -> pd.Series:
-    """Equal-weight average of each model's predictions, ranked per era first."""
+def combine_predictions(predictions: dict[str, pd.Series], era: pd.Series) -> pd.Series:
+    """Equal-weight average of each model's predictions, ranked per era first.
+
+    A lone model is returned untouched rather than ranked. That is not a
+    shortcut: whatever happens next — neutralization above all — sees the raw
+    prediction, and ranking first would change the result. Keeping the rule here
+    means the harness and the pipeline cannot disagree about what "combined" means.
+    """
+    if len(predictions) == 1:
+        return next(iter(predictions.values())).rename("prediction")
     ranked = {name: preds.groupby(era).rank(pct=True) for name, preds in predictions.items()}
     combined = sum(ranked.values()) / len(ranked)
     return combined.rename("prediction")
@@ -115,6 +123,36 @@ def submit_predictions(
     return submission
 
 
+def scoring_frames(dataset, config: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The target-bearing train/validation frames the pipeline actually fits and scores on."""
+    train_df = dataset.train.dropna(subset=["target"])
+    validation_df = dataset.validation.dropna(subset=["target"])
+    if config.max_eras is not None:
+        train_df = _last_eras(train_df, config.max_eras)
+        validation_df = _last_eras(validation_df, config.max_eras)
+    return train_df, validation_df
+
+
+def fit_models(
+    trainers: dict[str, Trainer], train_df: pd.DataFrame, feature_columns: list[str]
+) -> dict[str, object]:
+    return {
+        name: trainer(train_df[feature_columns], train_df["target"], train_df["era"])
+        for name, trainer in trainers.items()
+    }
+
+
+def predict_each(
+    fitted_models: dict[str, object], df: pd.DataFrame, feature_columns: list[str]
+) -> dict[str, pd.Series]:
+    return {
+        name: pd.Series(
+            model.predict(df[feature_columns]), index=df.index, name="prediction"
+        )
+        for name, model in fitted_models.items()
+    }
+
+
 def run_pipeline(
     config: PipelineConfig,
     *,
@@ -136,27 +174,12 @@ def run_pipeline(
     feature_columns = dataset.feature_columns
     neutralizers = neutralizers or feature_columns
 
-    train_df = dataset.train.dropna(subset=["target"])
-    validation_df = dataset.validation.dropna(subset=["target"])
-    if config.max_eras is not None:
-        train_df = _last_eras(train_df, config.max_eras)
-        validation_df = _last_eras(validation_df, config.max_eras)
+    train_df, validation_df = scoring_frames(dataset, config)
 
     _write_run_config(run_dir, config, trainers=trainers, neutralizers=neutralizers)
 
-    fitted_models = {
-        name: trainer(train_df[feature_columns], train_df["target"], train_df["era"])
-        for name, trainer in trainers.items()
-    }
-
-    validation_predictions = {
-        name: pd.Series(
-            model.predict(validation_df[feature_columns]),
-            index=validation_df.index,
-            name="prediction",
-        )
-        for name, model in fitted_models.items()
-    }
+    fitted_models = fit_models(trainers, train_df, feature_columns)
+    validation_predictions = predict_each(fitted_models, validation_df, feature_columns)
     validation_scores = {
         name: score_validation(
             validation_df[["era", "target"]].assign(prediction=preds),
@@ -166,28 +189,17 @@ def run_pipeline(
     for name, score in validation_scores.items():
         _write_score(run_dir, score, prefix=f"{name}_")
 
-    combined_validation_predictions = (
-        next(iter(validation_predictions.values()))
-        if len(validation_predictions) == 1
-        else _combine_predictions(validation_predictions, validation_df["era"])
+    combined_validation_predictions = combine_predictions(
+        validation_predictions, validation_df["era"]
     )
     combined_validation_score = score_validation(
         validation_df[["era", "target"]].assign(prediction=combined_validation_predictions)
     )
     _write_score(run_dir, combined_validation_score, prefix="")
 
-    live_predictions_by_model = {
-        name: pd.Series(
-            model.predict(dataset.live[feature_columns]),
-            index=dataset.live.index,
-            name="prediction",
-        )
-        for name, model in fitted_models.items()
-    }
-    live_predictions = (
-        next(iter(live_predictions_by_model.values()))
-        if len(live_predictions_by_model) == 1
-        else _combine_predictions(live_predictions_by_model, dataset.live["era"])
+    live_predictions_by_model = predict_each(fitted_models, dataset.live, feature_columns)
+    live_predictions = combine_predictions(
+        live_predictions_by_model, dataset.live["era"]
     )
     live_predictions.to_frame().to_csv(run_dir / "live_predictions.csv")
 
