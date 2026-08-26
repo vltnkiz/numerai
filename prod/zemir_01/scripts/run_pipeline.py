@@ -11,12 +11,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from zemir.config import (
     LIVE,
     MIN_VALIDATION_MEAN_CORR,
     MODEL_NAMES,
+    MODEL_WEIGHTS,
     SUBMISSION_MODEL_SLOT,
     build_trainers,
 )
@@ -28,11 +30,12 @@ def main() -> None:
     parser.add_argument("--model", choices=MODEL_NAMES, default="linear")
     args = parser.parse_args()
 
+    config = replace(LIVE, model_weights=MODEL_WEIGHTS[args.model])
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     result = run_pipeline(
-        LIVE,
+        config,
         run_id=run_id,
-        trainers=build_trainers(args.model, LIVE),
+        trainers=build_trainers(args.model, config),
     )
 
     print(f"run_id: {result.run_id}")

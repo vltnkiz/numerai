@@ -45,6 +45,9 @@ class PipelineConfig:
     xgboost: Mapping[str, object] = field(
         default_factory=lambda: dict(XGBOOST_HYPERPARAMS)
     )
+    # None = equal weight (combine_predictions' default). Set per `--model` by
+    # MODEL_WEIGHTS below; a lone model ignores this entirely.
+    model_weights: Mapping[str, float] | None = None
 
 
 LIVE = PipelineConfig()
@@ -77,6 +80,26 @@ def build_trainers(model: str, config: PipelineConfig) -> dict[str, Trainer]:
     return by_name[model]
 
 
+# Measured by scripts/sweep_weights.py against runs/harness/20260825T194439Z-ensemble/
+# (653 validation eras, neutralization_proportion fixed at 0.95 per issue #29) — issue #30.
+# Picked on mean_corr/sharpe/smart_sharpe, not the payout argmax: pure linear
+# (w=1.0) tops payout only because it is the fact-1 no-op on rank metrics —
+# the degenerate, do-nothing case #28 already flagged, not measured skill.
+# 0.3/0.7 is the outright best config in the sweep on corr, sharpe AND
+# smart_sharpe at once. A starting default, not a claim: re-sweep whenever a
+# model joins, leaves, or the fit changes. `models: [(name, trainer, weight),
+# ...]` per #34's structure is expressed here as {model-choice -> {trainer-name
+# -> weight}}, one entry per `build_trainers` model choice, rather than a
+# rewrite of the trainer selector.
+ENSEMBLE_MODEL_WEIGHTS: Mapping[str, float] = {"linear": 0.3, "era_boost": 0.7}
+
+MODEL_WEIGHTS: Mapping[str, Mapping[str, float] | None] = {
+    "linear": None,
+    "era_boost": None,
+    "ensemble": ENSEMBLE_MODEL_WEIGHTS,
+}
+
+
 @dataclass(frozen=True)
 class ScoringConfig:
     """One row of the comparison table: what to score, downstream of a fit.
@@ -100,6 +123,8 @@ class ScoringConfig:
     # neutralizing it is a positive rescaling that `combine_predictions`'s rank
     # transform is invariant to — this only changes non-linear models in `models`.
     neutralize_before_blend: bool = False
+    # Parallel to `models`; None = equal weight (combine_predictions' default).
+    weights: tuple[float, ...] | None = None
 
 
 def scoring_sweep(
@@ -136,6 +161,51 @@ def pre_blend_scoring_sweep(
             neutralize_before_blend=True,
         )
         for proportion in proportions
+    ]
+
+
+def _simplex_grid(n: int, resolution: int) -> list[tuple[float, ...]]:
+    """Every way to divide `resolution` units among `n` non-negative weights.
+
+    Generalizes past two models: at `n=2` this is the familiar `resolution + 1`
+    points along an edge; at `n=4, resolution=10` it's 286 points — still cheap,
+    since `score_configs` only recombines cached predictions, never refits.
+    """
+    if n == 1:
+        return [(1.0,)]
+
+    def _parts(remaining: int, slots: int):
+        if slots == 1:
+            yield (remaining,)
+            return
+        for i in range(remaining + 1):
+            for rest in _parts(remaining - i, slots - 1):
+                yield (i, *rest)
+
+    return [tuple(p / resolution for p in combo) for combo in _parts(resolution, n)]
+
+
+def weight_sweep(
+    models: tuple[str, ...],
+    *,
+    resolution: int = 10,
+    neutralization_proportion: float = 0.95,
+) -> list[ScoringConfig]:
+    """Every weighting of `models` on a resolution-`R` simplex grid, one proportion fixed.
+
+    The reusable primitive behind "how much of each model belongs in the
+    blend" (issue #30) — sweeps weight, not model set or proportion, so it
+    composes with `scoring_sweep`'s job rather than duplicating it. Reused
+    as-is whenever a model joins, leaves, or the fit changes.
+    """
+    return [
+        ScoringConfig(
+            f"{'+'.join(models)}_w{'-'.join(f'{w:g}' for w in weights)}_p{neutralization_proportion:g}",
+            models,
+            neutralization_proportion,
+            weights=weights,
+        )
+        for weights in _simplex_grid(len(models), resolution)
     ]
 
 

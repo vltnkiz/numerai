@@ -154,8 +154,8 @@ def score_configs(
                 name: cache[name] - config.neutralization_proportion * model_projections[name]
                 for name in config.models
             }
-            return combine_predictions(neutralized, cache["era"])
-        blend_name = _blend_name(config.models)
+            return combine_predictions(neutralized, cache["era"], _weights_map(config))
+        blend_name = _blend_name(config.models, config.weights)
         return blends[blend_name] - config.neutralization_proportion * blend_projections[blend_name]
 
     predictions = pd.DataFrame(
@@ -185,29 +185,39 @@ def score_configs(
     )
 
 
-def _blend_name(models: tuple[str, ...]) -> str:
-    return "+".join(models)
+def _weights_map(config: ScoringConfig) -> dict[str, float] | None:
+    if config.weights is None:
+        return None
+    return dict(zip(config.models, config.weights))
+
+
+def _blend_name(models: tuple[str, ...], weights: tuple[float, ...] | None = None) -> str:
+    if weights is None:
+        return "+".join(models)
+    return "+".join(f"{name}{w:g}" for name, w in zip(models, weights))
 
 
 def _blends(configs: list[ScoringConfig], cache: pd.DataFrame) -> pd.DataFrame:
-    """One column per *distinct* model set in the sweep, combined as production combines.
+    """One column per *distinct* (model set, weights) pair in the sweep.
 
-    Keyed by model set rather than by config, because the neutralization
-    proportion is applied afterwards — every config sharing a model set shares
-    one blend and one projection.
+    Keyed this way rather than by config, because the neutralization
+    proportion is applied afterwards — every config sharing a model set and
+    weighting shares one blend and one projection.
     """
-    model_sets = dict.fromkeys(config.models for config in configs)
+    blend_keys = dict.fromkeys((config.models, config.weights) for config in configs)
     missing = sorted(
-        {name for models in model_sets for name in models} - set(cache.columns)
+        {name for models, _ in blend_keys for name in models} - set(cache.columns)
     )
     if missing:
         raise KeyError(f"model(s) {missing} are not in this fit's cache")
 
     return pd.DataFrame(
         {
-            _blend_name(models): combine_predictions(
-                {name: cache[name] for name in models}, cache["era"]
+            _blend_name(models, weights): combine_predictions(
+                {name: cache[name] for name in models},
+                cache["era"],
+                dict(zip(models, weights)) if weights is not None else None,
             )
-            for models in model_sets
+            for models, weights in blend_keys
         }
     )

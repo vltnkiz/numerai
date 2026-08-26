@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -45,8 +46,15 @@ class PipelineResult:
     live_predictions_neutralized: pd.Series
 
 
-def combine_predictions(predictions: dict[str, pd.Series], era: pd.Series) -> pd.Series:
-    """Equal-weight average of each model's predictions, ranked per era first.
+def combine_predictions(
+    predictions: dict[str, pd.Series],
+    era: pd.Series,
+    weights: Mapping[str, float] | None = None,
+) -> pd.Series:
+    """Weighted average of each model's predictions, ranked per era first.
+
+    `weights` need not sum to 1 — it is normalized internally — and `None`
+    means equal weight, so unweighted callers see identical behavior to before.
 
     A lone model is returned untouched rather than ranked. That is not a
     shortcut: whatever happens next — neutralization above all — sees the raw
@@ -56,7 +64,12 @@ def combine_predictions(predictions: dict[str, pd.Series], era: pd.Series) -> pd
     if len(predictions) == 1:
         return next(iter(predictions.values())).rename("prediction")
     ranked = {name: preds.groupby(era).rank(pct=True) for name, preds in predictions.items()}
-    combined = sum(ranked.values()) / len(ranked)
+    if weights is None:
+        combined = sum(ranked.values()) / len(ranked)
+    else:
+        combined = sum(ranked[name] * weights[name] for name in ranked) / sum(
+            weights[name] for name in ranked
+        )
     return combined.rename("prediction")
 
 
@@ -190,7 +203,7 @@ def run_pipeline(
         _write_score(run_dir, score, prefix=f"{name}_")
 
     combined_validation_predictions = combine_predictions(
-        validation_predictions, validation_df["era"]
+        validation_predictions, validation_df["era"], config.model_weights
     )
     combined_validation_score = score_validation(
         validation_df[["era", "target"]].assign(prediction=combined_validation_predictions)
@@ -199,7 +212,7 @@ def run_pipeline(
 
     live_predictions_by_model = predict_each(fitted_models, dataset.live, feature_columns)
     live_predictions = combine_predictions(
-        live_predictions_by_model, dataset.live["era"]
+        live_predictions_by_model, dataset.live["era"], config.model_weights
     )
     live_predictions.to_frame().to_csv(run_dir / "live_predictions.csv")
 

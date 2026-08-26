@@ -16,9 +16,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 
-from zemir.config import LIVE, MODEL_NAMES, SMOKE, build_trainers
+from zemir.config import LIVE, MODEL_NAMES, MODEL_WEIGHTS, SMOKE, build_trainers
 from zemir.pipeline import RUNS_DIR, run_pipeline
 
 EXPERIMENTS_DIR = RUNS_DIR / "experiments"
@@ -34,7 +35,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = SMOKE if args.smoke else LIVE
+    config = replace(SMOKE if args.smoke else LIVE, model_weights=MODEL_WEIGHTS[args.model])
     suffix = "-smoke" if args.smoke else ""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
