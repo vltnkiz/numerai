@@ -28,8 +28,21 @@ def train_xgboost(
     learning_rate: float = 0.01,
     max_depth: int = 5,
     colsample_bytree: float = 0.1,
+    random_state: int = 0,
 ) -> XGBRegressor:
-    """Fit, then repeatedly re-fit on the worst-scoring `proportion` of eras."""
+    """Fit, then repeatedly re-fit on the worst-scoring `proportion` of eras.
+
+    The 40-iteration, 2050-tree budget and `proportion=0.5` are the canonical
+    additive-boosting loop run ~10x its original budget (issue #27) — measured
+    to beat a plain single fit (`num_iters=0`) on mean_corr/sharpe/smart_sharpe,
+    though it costs mean_mmc (issue #31). Whether 2050 trees is past the useful
+    point on that curve, and whether the worst-era set locks onto a fixed
+    subset instead of churning, is still unverified — flagged in issue #31 for
+    a follow-up rather than blocking this default.
+
+    `random_state` is explicit only to document intent: xgboost already falls
+    back to seed 0 internally, so fits were already bit-identical (issue #27).
+    """
     model = XGBRegressor(
         n_estimators=trees_per_step,
         learning_rate=learning_rate,
@@ -37,6 +50,7 @@ def train_xgboost(
         colsample_bytree=colsample_bytree,
         tree_method="hist",
         n_jobs=-1,
+        random_state=random_state,
     )
     model.fit(X, y)
 

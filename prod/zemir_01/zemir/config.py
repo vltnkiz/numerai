@@ -17,6 +17,9 @@ from dataclasses import dataclass, field, replace
 
 from zemir.models import Trainer, train_linear, train_xgboost
 
+# Issue #31: the loop measurably beats a plain single fit (`num_iters=0`) on
+# mean_corr/sharpe/smart_sharpe, so it ships as-is. `random_state` pinned only
+# to document intent — xgboost already defaulted to seed 0 internally.
 XGBOOST_HYPERPARAMS: Mapping[str, object] = {
     "trees_per_step": 50,
     "num_iters": 40,
@@ -24,6 +27,7 @@ XGBOOST_HYPERPARAMS: Mapping[str, object] = {
     "learning_rate": 0.01,
     "max_depth": 5,
     "colsample_bytree": 0.1,
+    "random_state": 0,
 }
 
 # Read only by scripts/run_pipeline.py — the one entrypoint that submits.
