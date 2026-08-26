@@ -171,7 +171,6 @@ def run_pipeline(
     *,
     run_id: str,
     trainers: dict[str, Trainer],
-    neutralizers: list[str] | None = None,
     runs_dir: Path = RUNS_DIR,
 ) -> PipelineResult:
     """Train, score, predict, neutralize and write artifacts.
@@ -185,7 +184,7 @@ def run_pipeline(
 
     dataset = download(config.data_version, config.feature_set)
     feature_columns = dataset.feature_columns
-    neutralizers = neutralizers or feature_columns
+    neutralizers = list(config.neutralizers) if config.neutralizers is not None else feature_columns
 
     train_df, validation_df = scoring_frames(dataset, config)
 

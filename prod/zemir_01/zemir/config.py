@@ -58,6 +58,9 @@ class PipelineConfig:
     # None = equal weight (combine_predictions' default). Set per `--model` by
     # MODEL_WEIGHTS below; a lone model ignores this entirely.
     model_weights: Mapping[str, float] | None = None
+    # None = every training feature (pipeline.py's own no-argument default). Set
+    # per `--model` by NEUTRALIZERS below.
+    neutralizers: tuple[str, ...] | None = None
 
 
 LIVE = PipelineConfig()
@@ -109,6 +112,35 @@ MODEL_WEIGHTS: Mapping[str, Mapping[str, float] | None] = {
     "ensemble": ENSEMBLE_MODEL_WEIGHTS,
 }
 
+# Measured by scripts/sweep_neutralizers.py against the same
+# runs/harness/20260825T194439Z-ensemble cache as ENSEMBLE_MODEL_WEIGHTS, ranked
+# by rank_feature_exposure on the shipped linear0.3+era_boost0.7 blend — issue
+# #35. The top-10-most-exposed subset was the best-payout row in a K-sweep
+# (5/10/15/21/30/full) that was otherwise noisy and non-monotonic in K: every
+# subset beat the full 42-feature set on payout/mean_corr/mmc, at the cost of
+# 5-8x higher max_feature_corr on the features it stops protecting against.
+# Chosen as the empirical winner despite that noise — not because the curve
+# points at K=10 specifically. Re-measure whenever a model joins, leaves, or
+# the fit changes, same as ENSEMBLE_MODEL_WEIGHTS.
+ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = (
+    "feature_petty_upraised_caddice",
+    "feature_jewish_stained_disembowelment",
+    "feature_snakiest_somalian_wavelet",
+    "feature_willful_sere_chronobiology",
+    "feature_departmental_inimitable_sentencer",
+    "feature_pottier_unmanly_collyrium",
+    "feature_antistrophic_striate_conscriptionist",
+    "feature_unbreakable_constraining_hegelianism",
+    "feature_transisthmian_yogic_linden",
+    "feature_stretchy_spiniest_fizgig",
+)
+
+NEUTRALIZERS: Mapping[str, tuple[str, ...] | None] = {
+    "linear": None,
+    "era_boost": None,
+    "ensemble": ENSEMBLE_NEUTRALIZERS,
+}
+
 
 @dataclass(frozen=True)
 class ScoringConfig:
@@ -135,6 +167,9 @@ class ScoringConfig:
     neutralize_before_blend: bool = False
     # Parallel to `models`; None = equal weight (combine_predictions' default).
     weights: tuple[float, ...] | None = None
+    # None = every training feature (today's default, per pipeline.py). A
+    # specific subset to project onto instead — issue #35.
+    neutralizers: tuple[str, ...] | None = None
 
 
 def scoring_sweep(
@@ -217,6 +252,40 @@ def weight_sweep(
         )
         for weights in _simplex_grid(len(models), resolution)
     ]
+
+
+def neutralizer_subset_sweep(
+    ranked_features: list[str],
+    ks: tuple[int, ...],
+    *,
+    models: tuple[str, ...] = ("linear", "era_boost"),
+    weights: tuple[float, ...] | None = (0.3, 0.7),
+    neutralization_proportion: float = 0.95,
+) -> list[ScoringConfig]:
+    """Compare full-feature neutralization against the top-K most-exposed features, by K.
+
+    `ranked_features` must already be sorted most- to least-exposed (see
+    `zemir.harness.rank_feature_exposure`) — this only slices it. The full set
+    (`neutralizers=None`, today's status quo) is always included as the
+    baseline row (issue #35).
+    """
+    full = ScoringConfig(
+        f"{'+'.join(models)}_p{neutralization_proportion:g}_full",
+        models,
+        neutralization_proportion,
+        weights=weights,
+    )
+    subsets = [
+        ScoringConfig(
+            f"{'+'.join(models)}_p{neutralization_proportion:g}_top{k}",
+            models,
+            neutralization_proportion,
+            weights=weights,
+            neutralizers=tuple(ranked_features[:k]),
+        )
+        for k in ks
+    ]
+    return [full, *subsets]
 
 
 # Today's live submission — linear only, neutralized at 0.5. The row every later

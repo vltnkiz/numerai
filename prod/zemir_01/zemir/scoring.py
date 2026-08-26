@@ -205,6 +205,26 @@ def era_max_feature_corr(
     return _by_era(era, largest)
 
 
+def era_feature_corr(
+    predictions: pd.Series, features: pd.DataFrame, era: pd.Series
+) -> pd.DataFrame:
+    """Per-era exposure of one prediction column to every feature — era_max_feature_corr's un-reduced input.
+
+    Ranks the prediction within era first, exactly as era_max_feature_corr and
+    rank_normalize do, so the correlation this reports is against the shape
+    Numerai actually receives. Used to rank features by measured exposure
+    (issue #35) rather than to score a submitted artifact.
+    """
+
+    def row(idx: pd.Index) -> pd.Series:
+        ranked = predictions.loc[idx].rank(pct=True).to_numpy(dtype=float).reshape(-1, 1)
+        exposures = features.loc[idx].to_numpy(dtype=float)
+        corr = _cross_correlation(ranked, exposures)[0]
+        return pd.Series(np.abs(corr), index=features.columns)
+
+    return _by_era(era, row)
+
+
 def _cross_correlation(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     """Pearson correlation of every column of `left` against every column of `right`.
 

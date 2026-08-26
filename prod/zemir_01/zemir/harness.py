@@ -21,6 +21,7 @@ is free.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from zemir.pipeline import (
     scoring_frames,
 )
 from zemir.scoring import (
+    era_feature_corr,
     era_feature_projection,
     era_max_feature_corr,
     era_mmc,
@@ -112,6 +114,42 @@ class ScoreResult:
     era_max_feature_corr: pd.DataFrame
 
 
+def _load_cache_and_features(run_dir: Path) -> tuple[pd.DataFrame, dict, pd.DataFrame, list[str]]:
+    """The cache, its own fit config, validation features, and the full neutralizer set.
+
+    Shared by `score_configs` and `rank_feature_exposure` so both read the
+    dataset the cache was actually fit on, never a guessed one.
+    """
+    cache = pd.read_parquet(run_dir / PREDICTIONS_FILENAME)
+    fit = json.loads((run_dir / "fit_config.json").read_text())
+    eras = sorted(cache["era"].unique(), key=int)
+    features = load_validation_features(
+        fit["data_version"], fit["feature_set"], eras=eras
+    ).loc[cache.index]
+    full_neutralizers = [c for c in features.columns if c != "era"]
+    return cache, fit, features, full_neutralizers
+
+
+def rank_feature_exposure(
+    run_dir: Path,
+    *,
+    models: tuple[str, ...] = ("linear", "era_boost"),
+    weights: Mapping[str, float] | None = None,
+) -> pd.Series:
+    """Mean absolute exposure of every feature to one blend, across every validation era.
+
+    Answers "exposure to what" for issue #35: ranks the pre-neutralization
+    blend — the artifact neutralization actually corrects — so a deliberate
+    neutralizer subset can target the features it is measurably most exposed
+    to, rather than a guessed or merely-published group. Descending order:
+    `.index[:k]` is the top-k most-exposed feature set.
+    """
+    cache, _, features, full_neutralizers = _load_cache_and_features(run_dir)
+    blend = combine_predictions({name: cache[name] for name in models}, cache["era"], weights)
+    exposure = era_feature_corr(blend, features[full_neutralizers], cache["era"])
+    return exposure.mean().sort_values(ascending=False)
+
+
 def score_configs(
     configs: list[ScoringConfig],
     *,
@@ -127,36 +165,66 @@ def score_configs(
 
     Reads which dataset produced the cache from its own `fit_config.json`, so a
     sweep can never be scored against the wrong features or the wrong meta model.
-    """
-    cache = pd.read_parquet(run_dir / PREDICTIONS_FILENAME)
-    fit = json.loads((run_dir / "fit_config.json").read_text())
 
-    eras = sorted(cache["era"].unique(), key=int)
-    features = load_validation_features(
-        fit["data_version"], fit["feature_set"], eras=eras
-    ).loc[cache.index]
-    neutralizers = [c for c in features.columns if c != "era"]
+    Each config may name its own neutralizer subset (`ScoringConfig.neutralizers`,
+    issue #35); `None` falls back to the full feature set, matching production.
+    The `max_feature_corr` diagnostic always measures exposure to the *full*
+    set regardless of what a config neutralized against — it is the total risk
+    being reported on, not a number a subset gets to grade itself on.
+    """
+    cache, fit, features, full_neutralizers = _load_cache_and_features(run_dir)
     meta_model = load_meta_model(fit["data_version"])
 
-    model_columns = [c for c in cache.columns if c not in ("era", "target")]
-    model_projections = era_feature_projection(
-        pd.concat([features, cache[model_columns]], axis=1), model_columns, neutralizers
-    )
-
     blends = _blends(configs, cache)
-    blend_projections = era_feature_projection(
-        pd.concat([features, blends], axis=1), list(blends.columns), neutralizers
-    )
+
+    def _neutralizers(config: ScoringConfig) -> tuple[str, ...]:
+        return tuple(config.neutralizers) if config.neutralizers is not None else tuple(full_neutralizers)
+
+    # Grouped by neutralizer set, not computed one column at a time: the sweep's
+    # common case (every config sharing the full feature set) batches every
+    # blend column into one era_feature_projection call per neutralizer group,
+    # so the per-era lstsq factorization is solved once and reused across
+    # columns — computed per column instead, this was ~3x slower measured on
+    # score_harness.py's 15-config sweep (issue #35).
+    def _grouped_projections(
+        source: pd.DataFrame, groups: dict[tuple[str, ...], set[str]]
+    ) -> dict[tuple[str, tuple[str, ...]], pd.Series]:
+        result: dict[tuple[str, tuple[str, ...]], pd.Series] = {}
+        for neutralizers, columns in groups.items():
+            ordered = sorted(columns)
+            projected = era_feature_projection(
+                pd.concat([features, source[ordered]], axis=1), ordered, list(neutralizers)
+            )
+            for column in ordered:
+                result[(column, neutralizers)] = projected[column]
+        return result
+
+    model_groups: dict[tuple[str, ...], set[str]] = {}
+    blend_groups: dict[tuple[str, ...], set[str]] = {}
+    for config in configs:
+        neutralizers = _neutralizers(config)
+        if config.neutralize_before_blend:
+            model_groups.setdefault(neutralizers, set()).update(config.models)
+        else:
+            blend_groups.setdefault(neutralizers, set()).add(_blend_name(config.models, config.weights))
+
+    model_projections = _grouped_projections(cache, model_groups)
+    blend_projections = _grouped_projections(blends, blend_groups)
 
     def _score(config: ScoringConfig) -> pd.Series:
+        neutralizers = _neutralizers(config)
         if config.neutralize_before_blend:
             neutralized = {
-                name: cache[name] - config.neutralization_proportion * model_projections[name]
+                name: cache[name]
+                - config.neutralization_proportion * model_projections[(name, neutralizers)]
                 for name in config.models
             }
             return combine_predictions(neutralized, cache["era"], _weights_map(config))
         blend_name = _blend_name(config.models, config.weights)
-        return blends[blend_name] - config.neutralization_proportion * blend_projections[blend_name]
+        return (
+            blends[blend_name]
+            - config.neutralization_proportion * blend_projections[(blend_name, neutralizers)]
+        )
 
     predictions = pd.DataFrame(
         {config.name: _score(config).astype("float32") for config in configs}
@@ -165,7 +233,7 @@ def score_configs(
     corr_by_era = era_numerai_corr(predictions, cache["target"], cache["era"])
     mmc_by_era = era_mmc(predictions, cache["target"], cache["era"], meta_model)
     exposure_by_era = era_max_feature_corr(
-        predictions, features[neutralizers], cache["era"]
+        predictions, features[full_neutralizers], cache["era"]
     )
     summary = summarize_era_scores(corr_by_era, mmc_by_era, exposure_by_era)
 

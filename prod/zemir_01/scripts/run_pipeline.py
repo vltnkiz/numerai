@@ -19,6 +19,7 @@ from zemir.config import (
     MIN_VALIDATION_MEAN_CORR,
     MODEL_NAMES,
     MODEL_WEIGHTS,
+    NEUTRALIZERS,
     SUBMISSION_MODEL_SLOT,
     build_trainers,
 )
@@ -30,7 +31,9 @@ def main() -> None:
     parser.add_argument("--model", choices=MODEL_NAMES, default="linear")
     args = parser.parse_args()
 
-    config = replace(LIVE, model_weights=MODEL_WEIGHTS[args.model])
+    config = replace(
+        LIVE, model_weights=MODEL_WEIGHTS[args.model], neutralizers=NEUTRALIZERS[args.model]
+    )
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     result = run_pipeline(
         config,
