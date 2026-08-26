@@ -138,18 +138,28 @@ def score_configs(
     neutralizers = [c for c in features.columns if c != "era"]
     meta_model = load_meta_model(fit["data_version"])
 
+    model_columns = [c for c in cache.columns if c not in ("era", "target")]
+    model_projections = era_feature_projection(
+        pd.concat([features, cache[model_columns]], axis=1), model_columns, neutralizers
+    )
+
     blends = _blends(configs, cache)
-    projections = era_feature_projection(
+    blend_projections = era_feature_projection(
         pd.concat([features, blends], axis=1), list(blends.columns), neutralizers
     )
+
+    def _score(config: ScoringConfig) -> pd.Series:
+        if config.neutralize_before_blend:
+            neutralized = {
+                name: cache[name] - config.neutralization_proportion * model_projections[name]
+                for name in config.models
+            }
+            return combine_predictions(neutralized, cache["era"])
+        blend_name = _blend_name(config.models)
+        return blends[blend_name] - config.neutralization_proportion * blend_projections[blend_name]
+
     predictions = pd.DataFrame(
-        {
-            config.name: (
-                blends[_blend_name(config.models)]
-                - config.neutralization_proportion * projections[_blend_name(config.models)]
-            ).astype("float32")
-            for config in configs
-        }
+        {config.name: _score(config).astype("float32") for config in configs}
     )
 
     corr_by_era = era_numerai_corr(predictions, cache["target"], cache["era"])

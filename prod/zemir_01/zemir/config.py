@@ -37,7 +37,10 @@ MODEL_NAMES = ["linear", "era_boost", "ensemble"]
 class PipelineConfig:
     data_version: str = "5.0"
     feature_set: str = "small"
-    neutralization_proportion: float = 0.5
+    # Full-blend neutralization, not the linear-only no-op 0.5 used to be:
+    # measured optimum is p=1.0 on the harness sweep (issue #29), backed off to
+    # 0.95 for margin against validate_predictions' zero-variance guard.
+    neutralization_proportion: float = 0.95
     max_eras: int | None = None  # None = every era
     xgboost: Mapping[str, object] = field(
         default_factory=lambda: dict(XGBOOST_HYPERPARAMS)
@@ -91,6 +94,12 @@ class ScoringConfig:
     name: str
     models: tuple[str, ...]
     neutralization_proportion: float = 0.0
+    # Neutralize each model's raw prediction before the per-era rank-blend, rather
+    # than neutralizing the blended result. Linear regression's prediction lies
+    # exactly in the neutralizers' span (issue #24, established fact 1), so
+    # neutralizing it is a positive rescaling that `combine_predictions`'s rank
+    # transform is invariant to — this only changes non-linear models in `models`.
+    neutralize_before_blend: bool = False
 
 
 def scoring_sweep(
@@ -105,6 +114,27 @@ def scoring_sweep(
     return [
         ScoringConfig(f"{'+'.join(models)}_p{proportion:g}", models, proportion)
         for models in model_sets
+        for proportion in proportions
+    ]
+
+
+def pre_blend_scoring_sweep(
+    proportions: tuple[float, ...] = (0.25, 0.5, 0.75, 1.0),
+) -> list[ScoringConfig]:
+    """Neutralize era_boost before blending with (untouched) linear, at each proportion.
+
+    Answers "neutralize XGBoost only, then blend" from issue #29: linear is
+    included in `models` for a correct rank-blend denominator, but pre-blend
+    neutralization is a no-op on it (see `ScoringConfig.neutralize_before_blend`),
+    so this measures the XGBoost-only-neutralized blend, not a three-way split.
+    """
+    return [
+        ScoringConfig(
+            f"linear+era_boost_pre_p{proportion:g}",
+            ("linear", "era_boost"),
+            proportion,
+            neutralize_before_blend=True,
+        )
         for proportion in proportions
     ]
 
