@@ -32,7 +32,13 @@ XGBOOST_HYPERPARAMS: Mapping[str, object] = {
 
 # Read only by scripts/run_pipeline.py — the one entrypoint that submits.
 SUBMISSION_MODEL_SLOT = "zemir_01"
-MIN_VALIDATION_MEAN_CORR = 0.0
+# A sanity floor, not a profitability gate (issue #32, per #34): catches a
+# clearly broken run (near-zero or negative rank correlation — a bug, not
+# weak signal) without tripping on a genuinely bad-but-real week. Set below
+# the worst legitimate window measured so far — the harness's recent-octile
+# low of 0.0019 (issue #28) — with margin, since that figure is on
+# numerai_corr, not this gate's spearman-based mean_corr.
+MIN_VALIDATION_MEAN_CORR = 0.001
 
 MODEL_NAMES = ["linear", "era_boost", "ensemble"]
 

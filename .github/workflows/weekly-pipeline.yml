@@ -15,7 +15,10 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Ensemble trains era_boost too (~1h locally, issue #24 Notes; CI runners
+    # aren't assumed faster). 30 min covered the old linear-only run; this
+    # keeps that same multiple of headroom over the now much heavier fit.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -32,4 +35,7 @@ jobs:
           NUMERAI_PUBLIC_ID: ${{ secrets.NUMERAI_PUBLIC_ID }}
           NUMERAI_SECRET_KEY: ${{ secrets.NUMERAI_SECRET_KEY }}
           NUMERAI_MODELS: ${{ secrets.NUMERAI_MODELS }}
-        run: python scripts/run_pipeline.py
+        # Explicit, not the script's own default (issue #32): the prior bare
+        # invocation silently ran linear-only, never the ensemble decided on
+        # this map.
+        run: python scripts/run_pipeline.py --model ensemble
