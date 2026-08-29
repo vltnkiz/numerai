@@ -45,7 +45,7 @@ MODEL_NAMES = ["linear", "era_boost", "ensemble"]
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    data_version: str = "5.0"
+    data_version: str = "5.3"
     feature_set: str = "small"
     # Full-blend neutralization, not the linear-only no-op 0.5 used to be:
     # measured optimum is p=1.0 on the harness sweep (issue #29), backed off to
