@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 from dotenv import load_dotenv
 from numerapi import NumerAPI
 
@@ -147,12 +148,35 @@ def scoring_frames(dataset, config: PipelineConfig) -> tuple[pd.DataFrame, pd.Da
 
 
 def fit_models(
-    trainers: dict[str, Trainer], train_df: pd.DataFrame, feature_columns: list[str]
+    trainers: dict[str, Trainer], X: pd.DataFrame, y: pd.Series, era: pd.Series
 ) -> dict[str, object]:
-    return {
-        name: trainer(train_df[feature_columns], train_df["target"], train_df["era"])
-        for name, trainer in trainers.items()
-    }
+    """Fit every trainer against the same, already-sliced `(X, y, era)`.
+
+    Takes the slice itself rather than `train_df` + `feature_columns`: slicing
+    once per trainer here re-copied the full feature matrix out of `train_df`
+    for each model in the ensemble, while `train_df` (which already contains
+    that data) stayed resident the whole time — a second full-width copy held
+    alongside the first for the entire fit. Callers slice once and drop their
+    `train_df` reference *before* calling this, so only one copy is ever live
+    (issue #47, the ~8.7GiB gap issue #45's investigation stalled on).
+
+    Releasing pyarrow's pool before *each* trainer, not once after all of them:
+    the caller has already dropped `train_df` by the time this runs, but
+    pyarrow's default pool (mimalloc) keeps those freed pages for reuse rather
+    than returning them to the OS, so they stay resident through every trainer
+    in turn. Measured at `all` width: 20.11GiB resident immediately after the
+    load and the drop, 9.77GiB after this call — **10.3GiB** that both the
+    linear and the era_boost stage were otherwise fitting on top of, and the
+    difference between issue #52's `all`-width ensemble fit breaching its
+    memory guard and clearing it. `zemir.harness` makes the same call after
+    this returns; that one frees the *fit's* residue before the validation
+    load, and is not this one.
+    """
+    fitted = {}
+    for name, trainer in trainers.items():
+        pa.default_memory_pool().release_unused()
+        fitted[name] = trainer(X, y, era)
+    return fitted
 
 
 def predict_each(
@@ -190,7 +214,9 @@ def run_pipeline(
 
     _write_run_config(run_dir, config, trainers=trainers, neutralizers=neutralizers)
 
-    fitted_models = fit_models(trainers, train_df, feature_columns)
+    X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
+    train_df = None
+    fitted_models = fit_models(trainers, X, y, era)
     validation_predictions = predict_each(fitted_models, validation_df, feature_columns)
     validation_scores = {
         name: score_validation(

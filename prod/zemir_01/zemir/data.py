@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 from numerapi import NumerAPI
 
@@ -31,9 +32,26 @@ def _download_file(napi: NumerAPI, version: str, filename: str, *, force: bool) 
 
 
 def _read_parquet(path: Path, feature_columns: list[str]) -> pd.DataFrame:
+    """Every non-feature column plus the requested features, and nothing else.
+
+    Releases pyarrow's pool before returning: `pd.read_parquet` decodes
+    through an intermediate Arrow table that pandas copies out of, and the
+    now-unreferenced table's arena isn't returned to the OS on its own — the
+    same pattern `load_validation_features`/`fit_models`/
+    `fit_validation_predictions` already work around, measured elsewhere at
+    `all` width as a ~2x RSS-vs-logical-size gap (issue #52). This is the one
+    caller of `pd.read_parquet` in this module that lacked the fix (issue
+    #54 found it while sizing a `max_eras`-truncated proxy fit at `all`
+    width: `load_split` reads a split's *full* row count before any era
+    truncation happens downstream, so this retained arena is paid in full
+    regardless of `max_eras`, and was quietly already part of the untruncated
+    full-scale peak).
+    """
     all_columns = pq.read_schema(path).names
     non_feature = [c for c in all_columns if not c.startswith("feature_")]
-    return pd.read_parquet(path, columns=non_feature + feature_columns)
+    frame = pd.read_parquet(path, columns=non_feature + feature_columns)
+    pa.default_memory_pool().release_unused()
+    return frame
 
 
 def feature_columns(
@@ -42,6 +60,37 @@ def feature_columns(
     napi = napi or NumerAPI()
     features_path = _download_file(napi, version, "features.json", force=False)
     return json.loads(features_path.read_text())["feature_sets"][feature_set]
+
+
+def load_split(
+    version: str,
+    feature_set: str,
+    split: str,
+    *,
+    feature_names: list[str] | None = None,
+    napi: NumerAPI | None = None,
+) -> pd.DataFrame:
+    """One dataset split ("train"/"validation"/"live"), and nothing else.
+
+    `download` reads all three splits before returning, so any caller of it
+    holds train+validation+live simultaneously even if it only ever touches
+    one at a time — issue #47 found that eager triple-load, not the fit
+    itself, is what pushes `all` width's ~3,414-column design matrix past the
+    ~52GB WSL memory cap. The harness never touches `live`, and only needs
+    train and validation one after the other, so it loads (and frees) them
+    one split at a time via this instead.
+
+    `feature_names` lets a caller pass an already-narrowed column list (e.g.
+    issue #45's dead-column drop) straight through to the parquet read,
+    rather than reading every column and dropping some afterward — dropping
+    after the fact means briefly holding both the wide and narrow copies.
+    """
+    napi = napi or NumerAPI()
+    names = feature_names if feature_names is not None else feature_columns(
+        version, feature_set, napi=napi
+    )
+    path = _download_file(napi, version, f"{split}.parquet", force=(split == "live"))
+    return _read_parquet(path, names)
 
 
 def load_validation_features(
@@ -57,12 +106,24 @@ def load_validation_features(
     load train and live the way `download` does — those are the fit's business,
     and the fit is already over by the time anything is scored. `eras` restricts
     the read at the parquet level, so a smoke-scale cache costs smoke-scale memory.
+
+    Releases pyarrow's pool before returning: at `all` width this read measured
+    29.67GiB resident against a 13.81GiB logical frame (issue #52) — the same
+    mimalloc-retained-arena pattern `zemir.harness`/`zemir.models` already work
+    around elsewhere, here because `pd.read_parquet` decodes through an
+    intermediate Arrow table that pandas copies out of, and the now-unreferenced
+    table's arena isn't returned to the OS on its own. This is what let
+    `score_configs`'s subsequent `pd.concat` (building the model/blend
+    projections) breach the machine's ~50GiB cap in under a minute, before any
+    of the actual per-era neutralization math had run.
     """
     napi = napi or NumerAPI()
     columns = feature_columns(version, feature_set, napi=napi)
     path = _download_file(napi, version, "validation.parquet", force=False)
     filters = [("era", "in", list(eras))] if eras is not None else None
-    return pd.read_parquet(path, columns=["era"] + columns, filters=filters)
+    frame = pd.read_parquet(path, columns=["era"] + columns, filters=filters)
+    pa.default_memory_pool().release_unused()
+    return frame
 
 
 def load_meta_model(version: str, *, napi: NumerAPI | None = None) -> pd.Series:

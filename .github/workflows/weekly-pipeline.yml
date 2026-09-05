@@ -10,17 +10,45 @@ name: Weekly zemir pipeline
 on:
   schedule:
     - cron: "0 14 * * 2-6"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Smoke-run without submitting (checks the runner, not the scores)"
+        type: boolean
+        default: false
 
 jobs:
   run-pipeline:
-    runs-on: ubuntu-latest
-    # Ensemble trains era_boost too (~1h locally, issue #24 Notes; CI runners
-    # aren't assumed faster). 30 min covered the old linear-only run; this
-    # keeps that same multiple of headroom over the now much heavier fit.
+    # Self-hosted, not `ubuntu-latest`: issue #38 widened `feature_set` from
+    # `small` (42 features) to `medium` (780), and the fit no longer fits a
+    # GitHub-hosted runner. The linear stage alone peaks at 21.48 GiB —
+    # `LinearRegression` upcasts the int8 design matrix to float64, which is
+    # 15.96 GiB at 2,746,268 x 780 before sklearn's centering copy — against
+    # `ubuntu-latest`'s 16 GB, and the ensemble also holds validation+live and
+    # fits era_boost on top (issue #44, measured). `zemir` labels this repo's
+    # own 5950x box (32 threads, 50 GB WSL cap).
+    #
+    # The cost of this line is that a live submission now depends on that
+    # machine being up with its runner service running: a day it is off is a
+    # day with no submission, which GitHub-hosted never was. That was the
+    # accepted trade — the alternatives were a per-minute-billed larger runner
+    # or squeezing the fit into 16 GB on a ~1 GB margin (issue #44).
+    runs-on: [self-hosted, zemir]
+    # Measured on this box: ~15-22 min for a full-scale `medium` ensemble fit
+    # (four harness runs, issue #44), plus live prediction and neutralization.
+    # The old 30-min-for-linear-only headroom multiple is kept rather than
+    # trimmed to the measurement — the first run on a fresh workspace also
+    # downloads the ~8.4 GB dataset.
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `datasets/` is gitignored and holds ~8.4 GB of v5.3 parquet that
+          # `zemir.data.download` caches across runs (only `live.parquet` is
+          # re-fetched each round; train/validation are static per version).
+          # The default `clean: true` runs `git clean -ffdx`, which deletes
+          # ignored files too — that would re-download all 8.4 GB every day.
+          clean: false
 
       - uses: actions/setup-python@v5
         with:
@@ -35,7 +63,18 @@ jobs:
           NUMERAI_PUBLIC_ID: ${{ secrets.NUMERAI_PUBLIC_ID }}
           NUMERAI_SECRET_KEY: ${{ secrets.NUMERAI_SECRET_KEY }}
           NUMERAI_MODELS: ${{ secrets.NUMERAI_MODELS }}
-        # Explicit, not the script's own default (issue #32): the prior bare
-        # invocation silently ran linear-only, never the ensemble decided on
-        # this map.
-        run: python scripts/run_pipeline.py --model ensemble
+        # Explicit `--model ensemble`, not the script's own default (issue
+        # #32): the prior bare invocation silently ran linear-only, never the
+        # ensemble decided on that map.
+        #
+        # Submitting is the default and every path that is not an explicit
+        # dry-run dispatch takes it — a scheduled run leaves `dry_run` empty,
+        # which is not "true". run_experiment.py contains no submission code
+        # at all (see its docstring), so the dry-run branch cannot upload.
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "DRY RUN — smoke scale, no submission"
+            python scripts/run_experiment.py --model ensemble --smoke
+          else
+            python scripts/run_pipeline.py --model ensemble
+          fi

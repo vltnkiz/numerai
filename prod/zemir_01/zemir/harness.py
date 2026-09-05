@@ -9,7 +9,7 @@ Split in two stages, because fitting is the only expensive part:
 
 1. `fit_validation_predictions` — trains each model on the train eras exactly as
    production does (same trainers, same frames, via `zemir.pipeline`) and caches
-   its raw validation predictions to parquet. ~1 hour with era boosting.
+   its raw validation predictions to parquet.
 2. `score_configs` — sweeps combination rules, neutralizers and proportions over
    those cached predictions. Seconds, and repeatable without refitting.
 
@@ -21,20 +21,23 @@ is free.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 
-from zemir.config import PipelineConfig, ScoringConfig, build_trainers
-from zemir.data import download, load_meta_model, load_validation_features
+from zemir.config import PipelineConfig, ScoringConfig
+from zemir.config import build_trainers as _default_build_trainers
+from zemir.data import feature_columns as _feature_columns
+from zemir.data import load_meta_model, load_split, load_validation_features
 from zemir.pipeline import (
     RUNS_DIR,
+    _last_eras,
     combine_predictions,
     fit_models,
     predict_each,
-    scoring_frames,
 )
 from zemir.scoring import (
     era_feature_corr,
@@ -62,6 +65,8 @@ def fit_validation_predictions(
     run_id: str,
     model: str = "ensemble",
     harness_dir: Path = HARNESS_DIR,
+    build_trainers: Callable[[str, PipelineConfig], dict] = _default_build_trainers,
+    drop_features: frozenset[str] | None = None,
 ) -> FitResult:
     """Fit production's models and cache their raw validation predictions.
 
@@ -69,16 +74,64 @@ def fit_validation_predictions(
     columns `era`, `target`, one per model) plus the `fit_config.json` that
     produced it — a scoring run stamps that config onto its results so a
     comparison is never read against the wrong fit.
+
+    `build_trainers` defaults to production's own (`zemir.config.build_trainers`);
+    overriding it is how issue #38's width comparison tries a regularized
+    linear stage without changing what production ships until that's decided.
+
+    `drop_features` excludes named columns from *every* trainer and from
+    prediction — issue #45's zero-variance/near-duplicate columns at `all`
+    width, which were only ever adding to the design matrix's memory
+    footprint and its near-singularity, never signal. Applied before each
+    split is even read off disk (via `load_split`'s `feature_names`), not
+    dropped from an already-loaded frame — reading 3,555 columns then
+    dropping 141 briefly holds both the wide and narrow copies; reading
+    3,414 to begin with never materializes the other 141 at all.
+
+    Loads train and validation one at a time via `load_split`, not both (and
+    `live`, which this never uses) up front the way `zemir.data.download`
+    does — issue #47 found that eager triple-load, not the fit itself, is
+    what pushed `all` width's design matrix past the ~52GB WSL memory cap:
+    validation isn't touched until `predict_each` runs *after* fitting, so
+    holding it (and the unused `live` split) resident for the whole ~1h fit
+    was pure waste on top of the fit's own design matrix.
     """
     run_dir = harness_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = download(config.data_version, config.feature_set)
-    train_df, validation_df = scoring_frames(dataset, config)
-    trainers = build_trainers(model, config)
+    feature_columns = _feature_columns(config.data_version, config.feature_set)
+    if drop_features:
+        feature_columns = [c for c in feature_columns if c not in drop_features]
 
-    fitted = fit_models(trainers, train_df, dataset.feature_columns)
-    predictions = predict_each(fitted, validation_df, dataset.feature_columns)
+    train_df = load_split(
+        config.data_version, config.feature_set, "train", feature_names=feature_columns
+    ).dropna(subset=["target"])
+    if config.max_eras is not None:
+        train_df = _last_eras(train_df, config.max_eras)
+    train_eras = len(train_df["era"].unique())
+
+    trainers = build_trainers(model, config)
+    X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
+    train_df = None
+    fitted = fit_models(trainers, X, y, era)
+    # trainers' own `del X, y` (e.g. train_sgd, train_ridge) only clears their
+    # local names — this frame's X is a separate binding to the same design
+    # matrix and stays resident until cleared here too. `release_unused()` is
+    # needed on top of that: pyarrow's default pool (mimalloc) holds freed
+    # pages for reuse rather than returning them to the OS, so RSS otherwise
+    # stays high straight through the validation load below (issue #51 found
+    # this the hard way — ~11GB of resident memory that only `del`-ing X, y,
+    # era never released, freed instead by this call).
+    X, y, era = None, None, None
+    pa.default_memory_pool().release_unused()
+
+    validation_df = load_split(
+        config.data_version, config.feature_set, "validation", feature_names=feature_columns
+    ).dropna(subset=["target"])
+    if config.max_eras is not None:
+        validation_df = _last_eras(validation_df, config.max_eras)
+
+    predictions = predict_each(fitted, validation_df, feature_columns)
 
     frame = validation_df[["era", "target"]].copy()
     for name, preds in predictions.items():
@@ -91,10 +144,11 @@ def fit_validation_predictions(
             {
                 "data_version": config.data_version,
                 "feature_set": config.feature_set,
+                "feature_count": len(feature_columns),
                 "max_eras": config.max_eras,
                 "xgboost": dict(config.xgboost),
                 "models": sorted(trainers),
-                "train_eras": len(train_df["era"].unique()),
+                "train_eras": train_eras,
                 "validation_eras": len(frame["era"].unique()),
                 "validation_rows": len(frame),
             },
