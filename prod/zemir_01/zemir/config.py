@@ -149,23 +149,22 @@ MODEL_WEIGHTS: Mapping[str, Mapping[str, float] | None] = {
     "ensemble": ENSEMBLE_MODEL_WEIGHTS,
 }
 
-# Measured by scripts/sweep_neutralizers.py against
-# runs/harness/20260901T105520Z-ensemble-medium/ (780 features, 647 validation
-# eras), ranked by rank_feature_exposure on the shipped linear0.3+era_boost0.7
-# blend — issue #43, reusing issue #35's methodology unchanged at the new width.
+# Re-measured by scripts/sweep_neutralizers.py against
+# runs/harness/20260905T205947Z-ensemble/ (780 features, 655 validation eras,
+# fit against the corrected target_ender_20 payout target per issue #64),
+# ranked by rank_feature_exposure on the shipped linear0.3+era_boost0.7 blend —
+# issue #65's re-baseline of #43's K choice.
 #
-# Half of `medium`'s 780 features, not the top *10* that shipped at `small`
-# width. The K-sweep (scaled to width by the same ratio #35 used: 93/186/279/
-# 390/557/full) has a real interior maximum here, unlike #35's noisy,
-# non-monotonic curve — payout climbs from top93 to top390, then falls back
-# through top557 to full. top390 wins outright on payout (0.017476, +16.6% over
-# the full set's 0.014996) and on mean_mmc (+29.4%), and costs far less
-# exposure than the `small`-width subset did (max_feature_corr 2.1x the full
-# set's, against 5-8x at #35). top-10's analogue at this width (top93) was the
-# *worst* payout in the sweep: top-K stops being the right shape of answer as
-# the pool grows, so re-measure K — don't carry it over — whenever a model
-# joins, leaves, the fit changes, or `feature_set` changes.
-_NEUTRALIZER_K = 390
+# #43's top390 no longer wins under the corrected target: it now trails both
+# the full set (payout −0.003009 for top557 vs −0.003756 full vs −0.004598 for
+# top390) and top557, which is the new outright best on payout. The K-sweep
+# (93/186/279/390/557/full) stays exactly as noisy and non-monotonic as #35
+# originally found — top279 is the worst point in the same sweep top557 wins —
+# so this is read as "the top390-shaped answer from #43 didn't survive the
+# target correction," not as a newly-found clean elbow. Re-measure K — don't
+# carry it over — whenever a model joins, leaves, the fit changes, the
+# scoring target changes, or `feature_set` changes.
+_NEUTRALIZER_K = 557
 ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = MEDIUM_FEATURE_EXPOSURE_RANKING[:_NEUTRALIZER_K]
 
 NEUTRALIZERS: Mapping[str, tuple[str, ...] | None] = {
