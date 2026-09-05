@@ -309,6 +309,7 @@ def train_xgboost(
     colsample_bytree: float = 0.1,
     random_state: int = 0,
     batch_rows: int = 200_000,
+    on_iteration: Callable[[int, "_ChunkedBoosterPredictor", list], None] | None = None,
 ) -> _ChunkedBoosterPredictor:
     """Fit, then repeatedly re-fit on the worst-scoring `proportion` of eras.
 
@@ -343,6 +344,13 @@ def train_xgboost(
 
     `random_state` is explicit only to document intent: xgboost already falls
     back to seed 0 internally, so fits were already bit-identical (issue #27).
+
+    `on_iteration`, when given, is called once before the loop (iteration 0,
+    the plain-fit anchor, with an empty worst-era list) and once after each of
+    the `num_iters` refits, with that refit's own worst-era list — an
+    observability seam for issue #36's budget-curve probe, never exercised by
+    the live path (`None` by default, and the loop's own memory shape is
+    unchanged either way).
     """
     params = {
         "objective": "reg:squarederror",
@@ -374,7 +382,10 @@ def train_xgboost(
     # subset is materialized whole.
     meta = pd.DataFrame({"era": era_values, "target": y_arr})
 
-    for _ in range(num_iters):
+    if on_iteration is not None:
+        on_iteration(0, predictor, [])
+
+    for iteration in range(1, num_iters + 1):
         meta["pred"] = predictor.predict(X_arr)
         era_scores = (
             meta.groupby("era")
@@ -403,5 +414,8 @@ def train_xgboost(
             params, dworst, num_boost_round=trees_per_step, xgb_model=booster
         )
         predictor = _ChunkedBoosterPredictor(booster, chunk_rows=batch_rows)
+
+        if on_iteration is not None:
+            on_iteration(iteration, predictor, worst_eras)
 
     return predictor
