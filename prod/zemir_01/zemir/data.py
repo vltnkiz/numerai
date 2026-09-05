@@ -31,7 +31,9 @@ def _download_file(napi: NumerAPI, version: str, filename: str, *, force: bool) 
     return dest_path
 
 
-def _read_parquet(path: Path, feature_columns: list[str]) -> pd.DataFrame:
+def _read_parquet(
+    path: Path, feature_columns: list[str], *, target_column: str = "target"
+) -> pd.DataFrame:
     """Every non-feature column plus the requested features, and nothing else.
 
     Releases pyarrow's pool before returning: `pd.read_parquet` decodes
@@ -46,10 +48,20 @@ def _read_parquet(path: Path, feature_columns: list[str]) -> pd.DataFrame:
     truncation happens downstream, so this retained arena is paid in full
     regardless of `max_eras`, and was quietly already part of the untruncated
     full-scale peak).
+
+    `target_column` overwrites the dataset's generic `target` alias with a
+    named target column (e.g. `target_ender_20`) — every non-feature column is
+    already read above, so the named column is already present in `frame` and
+    this is a same-frame reassignment, not another read. The alias is *not*
+    guaranteed to track whichever target Numerai currently pays on (issue
+    #64: v5.3's `target` aliases `target_ender_60`, not the `target_ender_20`
+    Numerai has scored payouts against since 2026-01-01) — see CONTEXT.md.
     """
     all_columns = pq.read_schema(path).names
     non_feature = [c for c in all_columns if not c.startswith("feature_")]
     frame = pd.read_parquet(path, columns=non_feature + feature_columns)
+    if target_column != "target" and "target" in frame.columns:
+        frame["target"] = frame[target_column]
     pa.default_memory_pool().release_unused()
     return frame
 
@@ -68,6 +80,7 @@ def load_split(
     split: str,
     *,
     feature_names: list[str] | None = None,
+    target_column: str = "target",
     napi: NumerAPI | None = None,
 ) -> pd.DataFrame:
     """One dataset split ("train"/"validation"/"live"), and nothing else.
@@ -84,13 +97,15 @@ def load_split(
     issue #45's dead-column drop) straight through to the parquet read,
     rather than reading every column and dropping some afterward — dropping
     after the fact means briefly holding both the wide and narrow copies.
+
+    `target_column` is passed straight through to `_read_parquet` (issue #64).
     """
     napi = napi or NumerAPI()
     names = feature_names if feature_names is not None else feature_columns(
         version, feature_set, napi=napi
     )
     path = _download_file(napi, version, f"{split}.parquet", force=(split == "live"))
-    return _read_parquet(path, names)
+    return _read_parquet(path, names, target_column=target_column)
 
 
 def load_validation_features(
@@ -138,7 +153,13 @@ def load_meta_model(version: str, *, napi: NumerAPI | None = None) -> pd.Series:
     return frame["numerai_meta_model"].dropna()
 
 
-def download(version: str, feature_set: str, *, napi: NumerAPI | None = None) -> Dataset:
+def download(
+    version: str,
+    feature_set: str,
+    *,
+    target_column: str = "target",
+    napi: NumerAPI | None = None,
+) -> Dataset:
     napi = napi or NumerAPI()
 
     feature_names = feature_columns(version, feature_set, napi=napi)
@@ -150,8 +171,10 @@ def download(version: str, feature_set: str, *, napi: NumerAPI | None = None) ->
     live_path = _download_file(napi, version, "live.parquet", force=True)
 
     return Dataset(
-        train=_read_parquet(train_path, feature_names),
-        validation=_read_parquet(validation_path, feature_names),
-        live=_read_parquet(live_path, feature_names),
+        train=_read_parquet(train_path, feature_names, target_column=target_column),
+        validation=_read_parquet(
+            validation_path, feature_names, target_column=target_column
+        ),
+        live=_read_parquet(live_path, feature_names, target_column=target_column),
         feature_columns=feature_names,
     )

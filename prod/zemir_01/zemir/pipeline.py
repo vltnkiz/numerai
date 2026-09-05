@@ -206,7 +206,9 @@ def run_pipeline(
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = download(config.data_version, config.feature_set)
+    dataset = download(
+        config.data_version, config.feature_set, target_column=config.target_column
+    )
     feature_columns = dataset.feature_columns
     neutralizers = list(config.neutralizers) if config.neutralizers is not None else feature_columns
 

@@ -104,7 +104,11 @@ def fit_validation_predictions(
         feature_columns = [c for c in feature_columns if c not in drop_features]
 
     train_df = load_split(
-        config.data_version, config.feature_set, "train", feature_names=feature_columns
+        config.data_version,
+        config.feature_set,
+        "train",
+        feature_names=feature_columns,
+        target_column=config.target_column,
     ).dropna(subset=["target"])
     if config.max_eras is not None:
         train_df = _last_eras(train_df, config.max_eras)
@@ -126,7 +130,11 @@ def fit_validation_predictions(
     pa.default_memory_pool().release_unused()
 
     validation_df = load_split(
-        config.data_version, config.feature_set, "validation", feature_names=feature_columns
+        config.data_version,
+        config.feature_set,
+        "validation",
+        feature_names=feature_columns,
+        target_column=config.target_column,
     ).dropna(subset=["target"])
     if config.max_eras is not None:
         validation_df = _last_eras(validation_df, config.max_eras)

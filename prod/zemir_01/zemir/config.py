@@ -41,6 +41,15 @@ XGBOOST_HYPERPARAMS: Mapping[str, object] = {
     "random_state": 0,
 }
 
+# The dataset's generic `target` alias is not guaranteed to track whichever
+# target Numerai currently pays on — v5.3's `target` aliases `target_ender_60`,
+# while Numerai has scored payouts against `target_ender_20` specifically since
+# 2026-01-01 (confirmed via Numerai's own announcement, not the dataset's own
+# metadata). Era-wise Spearman between the two over the 647-era validation
+# window is only 0.465 (issue #64) — a real divergence, not noise. See
+# CONTEXT.md's `target` alias / payout target distinction.
+TARGET_COLUMN = "target_ender_20"
+
 # Read only by scripts/run_pipeline.py — the one entrypoint that submits.
 SUBMISSION_MODEL_SLOT = "zemir_01"
 # A sanity floor, not a profitability gate (issue #32, per #34): catches a
@@ -69,6 +78,12 @@ class PipelineConfig:
     # ~9.7% behind `medium` on payout (#48), as was a linear-at-`all` /
     # era_boost-at-`medium` hybrid (#60).
     feature_set: str = "medium"
+    # Overwrites the dataset's `target` alias with this named column right at
+    # load (`zemir.data._read_parquet`) — every downstream site still reads
+    # plain `"target"` unchanged. Issue #64: switched from the alias's
+    # untouched default (`target_ender_60` in v5.3) to the actual payout
+    # target, `target_ender_20`.
+    target_column: str = TARGET_COLUMN
     # Full-blend neutralization, not the linear-only no-op 0.5 used to be:
     # measured optimum is p=1.0 on the harness sweep (issue #29), backed off to
     # 0.95 for margin against validate_predictions' zero-variance guard.
