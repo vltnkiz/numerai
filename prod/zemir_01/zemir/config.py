@@ -16,17 +16,28 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
 from zemir.models import Trainer, train_linear, train_xgboost
+from zemir.neutralizer_ranking import MEDIUM_FEATURE_EXPOSURE_RANKING
 
 # Issue #31: the loop measurably beats a plain single fit (`num_iters=0`) on
 # mean_corr/sharpe/smart_sharpe, so it ships as-is. `random_state` pinned only
 # to document intent — xgboost already defaulted to seed 0 internally.
+#
+# `colsample_bytree` is retuned to the feature-set width, not left at a fixed
+# fraction (issue #42): the quantity that matters is how many features a tree
+# actually samples, and a fraction tuned at `small`'s 42 features means
+# something entirely different at `medium`'s 780. Holding the *absolute* count
+# roughly constant — `small`'s shipped 0.1 x 42 ~ 4.2 features/tree, so
+# 4.2/780 ~ 0.00538, rounded to 0.005 (~3.9 features/tree) — is the heuristic,
+# not an independent sweep; #42's width comparison was decisive enough
+# (~11.4x `small`'s best payout) not to need one. Retune this whenever
+# `feature_set` changes.
 XGBOOST_HYPERPARAMS: Mapping[str, object] = {
     "trees_per_step": 50,
     "num_iters": 40,
     "proportion": 0.5,
     "learning_rate": 0.01,
     "max_depth": 5,
-    "colsample_bytree": 0.1,
+    "colsample_bytree": 0.005,
     "random_state": 0,
 }
 
@@ -46,7 +57,18 @@ MODEL_NAMES = ["linear", "era_boost", "ensemble"]
 @dataclass(frozen=True)
 class PipelineConfig:
     data_version: str = "5.3"
-    feature_set: str = "small"
+    # v5.3's 780-feature `medium`, not the 42-feature `small` production ran
+    # through issue #38. Measured at full scale on the harness's paid metrics:
+    # payout 0.016411 vs `small`'s best achievable 0.001436 (~11.4x), with
+    # `mean_mmc` flipping from negative to positive across every configuration
+    # (#42). `medium` is not a superset of `small` — only 11 of `small`'s 42
+    # features appear in it (#41), so this is a different feature basis, not
+    # "small plus more". `all` (3,555 features) was ruled out twice on
+    # measurement, not on principle: infeasible in memory as first attempted
+    # (#42/#45), then fitted successfully after a streaming rewrite and still
+    # ~9.7% behind `medium` on payout (#48), as was a linear-at-`all` /
+    # era_boost-at-`medium` hybrid (#60).
+    feature_set: str = "medium"
     # Full-blend neutralization, not the linear-only no-op 0.5 used to be:
     # measured optimum is p=1.0 on the harness sweep (issue #29), backed off to
     # 0.95 for margin against validate_predictions' zero-variance guard.
@@ -112,28 +134,24 @@ MODEL_WEIGHTS: Mapping[str, Mapping[str, float] | None] = {
     "ensemble": ENSEMBLE_MODEL_WEIGHTS,
 }
 
-# Measured by scripts/sweep_neutralizers.py against the same
-# runs/harness/20260825T194439Z-ensemble cache as ENSEMBLE_MODEL_WEIGHTS, ranked
-# by rank_feature_exposure on the shipped linear0.3+era_boost0.7 blend — issue
-# #35. The top-10-most-exposed subset was the best-payout row in a K-sweep
-# (5/10/15/21/30/full) that was otherwise noisy and non-monotonic in K: every
-# subset beat the full 42-feature set on payout/mean_corr/mmc, at the cost of
-# 5-8x higher max_feature_corr on the features it stops protecting against.
-# Chosen as the empirical winner despite that noise — not because the curve
-# points at K=10 specifically. Re-measure whenever a model joins, leaves, or
-# the fit changes, same as ENSEMBLE_MODEL_WEIGHTS.
-ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = (
-    "feature_petty_upraised_caddice",
-    "feature_jewish_stained_disembowelment",
-    "feature_snakiest_somalian_wavelet",
-    "feature_willful_sere_chronobiology",
-    "feature_departmental_inimitable_sentencer",
-    "feature_pottier_unmanly_collyrium",
-    "feature_antistrophic_striate_conscriptionist",
-    "feature_unbreakable_constraining_hegelianism",
-    "feature_transisthmian_yogic_linden",
-    "feature_stretchy_spiniest_fizgig",
-)
+# Measured by scripts/sweep_neutralizers.py against
+# runs/harness/20260901T105520Z-ensemble-medium/ (780 features, 647 validation
+# eras), ranked by rank_feature_exposure on the shipped linear0.3+era_boost0.7
+# blend — issue #43, reusing issue #35's methodology unchanged at the new width.
+#
+# Half of `medium`'s 780 features, not the top *10* that shipped at `small`
+# width. The K-sweep (scaled to width by the same ratio #35 used: 93/186/279/
+# 390/557/full) has a real interior maximum here, unlike #35's noisy,
+# non-monotonic curve — payout climbs from top93 to top390, then falls back
+# through top557 to full. top390 wins outright on payout (0.017476, +16.6% over
+# the full set's 0.014996) and on mean_mmc (+29.4%), and costs far less
+# exposure than the `small`-width subset did (max_feature_corr 2.1x the full
+# set's, against 5-8x at #35). top-10's analogue at this width (top93) was the
+# *worst* payout in the sweep: top-K stops being the right shape of answer as
+# the pool grows, so re-measure K — don't carry it over — whenever a model
+# joins, leaves, the fit changes, or `feature_set` changes.
+_NEUTRALIZER_K = 390
+ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = MEDIUM_FEATURE_EXPOSURE_RANKING[:_NEUTRALIZER_K]
 
 NEUTRALIZERS: Mapping[str, tuple[str, ...] | None] = {
     "linear": None,
