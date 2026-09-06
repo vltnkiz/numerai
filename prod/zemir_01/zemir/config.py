@@ -164,6 +164,14 @@ MODEL_WEIGHTS: Mapping[str, Mapping[str, float] | None] = {
 # target correction," not as a newly-found clean elbow. Re-measure K — don't
 # carry it over — whenever a model joins, leaves, the fit changes, the
 # scoring target changes, or `feature_set` changes.
+#
+# Decided on payout alone, and that is the whole criterion: feature exposure
+# (`max_feature_corr`) is priced nowhere on Numerai Classic — not in payouts,
+# burn, the payout factor, stake eligibility, the stake cap, or meta-model
+# weighting (issue #66, verified against Numerai's docs; see CONTEXT.md).
+# The higher exposure a smaller K accepts is a diagnostic to report, not a
+# cost to trade payout against. Do not reintroduce it as a tiebreaker when
+# re-measuring K.
 _NEUTRALIZER_K = 557
 ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = MEDIUM_FEATURE_EXPOSURE_RANKING[:_NEUTRALIZER_K]
 
