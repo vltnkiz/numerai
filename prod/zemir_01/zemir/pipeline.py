@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +26,12 @@ from zemir.scoring import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
+SCORE_LOG_PATH = REPO_ROOT / "prod" / "zemir_01" / "score_log.jsonl"
+
+# Issue #68: how long a live run's scores and run directory stay around, on
+# the log (committed, tiny) and on disk (gitignored, ~100 MB/run) alike.
+RETENTION_DAYS = 365
+_RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
 class ValidationScoreBelowThreshold(RuntimeError):
@@ -302,3 +310,82 @@ def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
         )
     )
     score.era_corr.to_csv(run_dir / f"{prefix}validation_era_corr.csv", header=["corr"])
+
+
+def _run_id_age_days(run_id: str, *, now: datetime) -> float | None:
+    """Days between `run_id`'s timestamp and `now`, or None if `run_id` isn't one."""
+    try:
+        stamp = datetime.strptime(run_id, _RUN_ID_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (now - stamp).total_seconds() / 86400
+
+
+def append_score_log(
+    *,
+    run_id: str,
+    target_column: str,
+    validation_scores: Mapping[str, ValidationScore],
+    combined_validation_score: ValidationScore,
+    submission_id: str | None,
+    log_path: Path = SCORE_LOG_PATH,
+    now: datetime | None = None,
+) -> None:
+    """Append one live run's scores to the cross-run history log.
+
+    Called for every scripts/run_pipeline.py invocation regardless of the
+    validation-score gate, so a run that fails the gate still leaves a trace —
+    the gate only catches a run crashing through the floor, not one quietly
+    declining above it (issue #68). Prunes entries older than
+    `RETENTION_DAYS` on each append, so the file stays small forever rather
+    than growing without bound.
+    """
+
+    def _score_dict(score: ValidationScore) -> dict[str, float]:
+        return {
+            "mean_corr": score.mean_corr,
+            "sharpe": score.sharpe,
+            "smart_sharpe": score.smart_sharpe,
+        }
+
+    now = now or datetime.now(timezone.utc)
+    entries = []
+    if log_path.exists():
+        entries = [json.loads(line) for line in log_path.read_text().splitlines() if line]
+    entries = [
+        e
+        for e in entries
+        if (age := _run_id_age_days(e["run_id"], now=now)) is not None and age <= RETENTION_DAYS
+    ]
+    entries.append(
+        {
+            "run_id": run_id,
+            "target_column": target_column,
+            "models": {name: _score_dict(s) for name, s in validation_scores.items()},
+            "combined": _score_dict(combined_validation_score),
+            "submission_id": submission_id,
+        }
+    )
+    log_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+
+def prune_old_runs(*, runs_dir: Path = RUNS_DIR, now: datetime | None = None) -> list[str]:
+    """Delete live run directories older than `RETENTION_DAYS`; return the run_ids removed.
+
+    Only touches `runs_dir`'s direct children whose name is a run_id
+    timestamp — `runs/experiments/` and `runs/harness/` are local, developer-
+    driven artifacts with their own lifecycle and are left alone (issue #68
+    scopes this to the daily live run's disk growth).
+    """
+    if not runs_dir.exists():
+        return []
+    now = now or datetime.now(timezone.utc)
+    removed = []
+    for child in runs_dir.iterdir():
+        if not child.is_dir():
+            continue
+        age = _run_id_age_days(child.name, now=now)
+        if age is not None and age > RETENTION_DAYS:
+            shutil.rmtree(child)
+            removed.append(child.name)
+    return removed

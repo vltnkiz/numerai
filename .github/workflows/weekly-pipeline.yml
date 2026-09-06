@@ -19,6 +19,10 @@ on:
 
 jobs:
   run-pipeline:
+    # score_log.jsonl (issue #68) is committed back to the repo each run, so
+    # the default read-only GITHUB_TOKEN needs an explicit write grant.
+    permissions:
+      contents: write
     # Self-hosted, not `ubuntu-latest`: issue #38 widened `feature_set` from
     # `small` (42 features) to `medium` (780), and the fit no longer fits a
     # GitHub-hosted runner. The linear stage alone peaks at 21.48 GiB —
@@ -77,4 +81,23 @@ jobs:
             python scripts/run_experiment.py --model ensemble --smoke
           else
             python scripts/run_pipeline.py --model ensemble
+          fi
+
+      # `if: always()` so a run that fails the validation-score gate (a
+      # non-zero exit from the step above) still records its score — that's
+      # the whole point of issue #68's log: catching a decline the gate
+      # itself doesn't stop. Dry runs never touch score_log.jsonl, so this is
+      # a harmless no-op on that path.
+      - name: Commit score log
+        if: always()
+        working-directory: prod/zemir_01
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add score_log.jsonl
+          if git diff --cached --quiet; then
+            echo "no score log changes to commit"
+          else
+            git commit -m "Record score_log entry for run ${{ github.run_id }}"
+            git push
           fi

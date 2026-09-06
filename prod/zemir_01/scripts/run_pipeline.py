@@ -23,7 +23,14 @@ from zemir.config import (
     SUBMISSION_MODEL_SLOT,
     build_trainers,
 )
-from zemir.pipeline import ValidationScoreBelowThreshold, run_pipeline, submit_predictions
+from zemir.pipeline import (
+    RETENTION_DAYS,
+    ValidationScoreBelowThreshold,
+    append_score_log,
+    prune_old_runs,
+    run_pipeline,
+    submit_predictions,
+)
 
 
 def main() -> None:
@@ -52,21 +59,38 @@ def main() -> None:
 
     # The gate guards submission, so it sits with submission — not inside the
     # pipeline, which cannot submit and so has nothing to stop.
-    if result.combined_validation_score.mean_corr < MIN_VALIDATION_MEAN_CORR:
+    below_gate = result.combined_validation_score.mean_corr < MIN_VALIDATION_MEAN_CORR
+    submission = None
+    if not below_gate:
+        submission = submit_predictions(
+            result.live_predictions_neutralized.rename("prediction"),
+            model_slot=SUBMISSION_MODEL_SLOT,
+            run_dir=result.run_dir,
+        )
+        print(
+            f"submitted to {submission.model_name} ({submission.model_id}): "
+            f"submission_id={submission.submission_id}"
+        )
+
+    # Logged regardless of the gate outcome (issue #68): the gate only catches
+    # a run crashing through the floor, not one quietly declining above it —
+    # that needs history, which a gate-only run would never accumulate.
+    append_score_log(
+        run_id=result.run_id,
+        target_column=config.target_column,
+        validation_scores=result.validation_scores,
+        combined_validation_score=result.combined_validation_score,
+        submission_id=submission.submission_id if submission else None,
+    )
+    removed = prune_old_runs()
+    if removed:
+        print(f"pruned {len(removed)} run dir(s) past the {RETENTION_DAYS}-day retention window")
+
+    if below_gate:
         raise ValidationScoreBelowThreshold(
             f"validation mean_corr {result.combined_validation_score.mean_corr:.4f} < "
             f"MIN_VALIDATION_MEAN_CORR {MIN_VALIDATION_MEAN_CORR:.4f} — not submitting"
         )
-
-    submission = submit_predictions(
-        result.live_predictions_neutralized.rename("prediction"),
-        model_slot=SUBMISSION_MODEL_SLOT,
-        run_dir=result.run_dir,
-    )
-    print(
-        f"submitted to {submission.model_name} ({submission.model_id}): "
-        f"submission_id={submission.submission_id}"
-    )
 
 
 if __name__ == "__main__":
