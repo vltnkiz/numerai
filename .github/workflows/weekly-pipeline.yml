@@ -1,15 +1,19 @@
 name: Weekly zemir pipeline
 
-# Numerai Classic releases new live features and accepts submissions
-# Tuesday-Saturday (docs/research/live-round-data-and-submission.md), but no
-# exact open/close wall-clock time is a documented constant, so this fires
-# once daily, generously across that whole window, rather than at one
-# precisely-timed slot. zemir/pipeline.py has no separate round-open gate
-# (see its module docstring) — a day with nothing to submit is expected to
-# surface as a failed run here, not a silent skip.
+# Numerai Classic opens rounds Tuesday-Saturday at a nominal 12:00 UTC and
+# closes staking ~13:00-13:25 UTC on weekdays (Sat stays open until Sun
+# 16:00) — but Numerai's own docs disclaim any upper bound on open-time
+# slippage, so this fires right at the nominal open rather than hours later.
+# Issue #33: the previous 14:00 UTC fire time landed ~45 min after close on
+# 4 of 5 weekdays, making every one of those submissions ineligible to stake.
+# Landing early is safe: scripts/run_pipeline.py now polls
+# `NumerAPI.check_round_open()` (zemir.pipeline.wait_for_round_open) before
+# downloading live data, so a round that hasn't opened yet is waited out
+# rather than raced. A day with nothing to submit even after that wait is
+# still expected to surface as a failed run here, not a silent skip.
 on:
   schedule:
-    - cron: "0 14 * * 2-6"
+    - cron: "0 12 * * 2-6"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -30,7 +34,7 @@ jobs:
     # 15.96 GiB at 2,746,268 x 780 before sklearn's centering copy — against
     # `ubuntu-latest`'s 16 GB, and the ensemble also holds validation+live and
     # fits era_boost on top (issue #44, measured). `zemir` labels this repo's
-    # own 5950x box (32 threads, 50 GB WSL cap).
+    # own 5950x box (32 threads, 50 GB RAM WSL cap).
     #
     # The cost of this line is that a live submission now depends on that
     # machine being up with its runner service running: a day it is off is a

@@ -28,6 +28,7 @@ from zemir.pipeline import (
     append_score_log,
     run_pipeline,
     submit_predictions,
+    wait_for_round_open,
 )
 
 
@@ -39,6 +40,9 @@ def main() -> None:
     config = replace(
         LIVE, model_weights=MODEL_WEIGHTS[args.model], neutralizers=NEUTRALIZERS[args.model]
     )
+    # Issue #33: wait for the round to actually be open before downloading
+    # live data, rather than trusting the cron's fire time to land after it.
+    wait_for_round_open()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     result = run_pipeline(
         config,

@@ -62,6 +62,17 @@ MIN_VALIDATION_MEAN_CORR = 0.001
 
 MODEL_NAMES = ["linear", "era_boost", "ensemble"]
 
+# Issue #33: round open/close wall-clock timing is not a documented Numerai
+# guarantee (their docs disclaim an upper bound on open-time slippage), so
+# rather than guess a safe cron offset, scripts/run_pipeline.py polls
+# `NumerAPI.check_round_open()` before downloading live data. Observed slip
+# on recent rounds topped out at ~12 min past the nominal 12:00 UTC open;
+# this budget is generous well past that. Read only by scripts/run_pipeline.py
+# — the one entrypoint gated on round timing (run_experiment.py's harness
+# path always runs, regardless of live round state).
+ROUND_OPEN_POLL_INTERVAL_SECONDS = 120
+ROUND_OPEN_MAX_WAIT_SECONDS = 45 * 60
+
 
 @dataclass(frozen=True)
 class PipelineConfig:
