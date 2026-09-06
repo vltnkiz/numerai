@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -28,8 +27,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
 SCORE_LOG_PATH = REPO_ROOT / "prod" / "zemir_01" / "score_log.jsonl"
 
-# Issue #68: how long a live run's scores and run directory stay around, on
-# the log (committed, tiny) and on disk (gitignored, ~100 MB/run) alike.
+# Issue #68: how long a live run's scores stay in the committed history log.
+# Run directories on disk (gitignored, ~100 MB/run) are kept indefinitely —
+# the self-hosted box has ~941 GB free, so pruning them isn't worth the code.
 RETENTION_DAYS = 365
 _RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
 
@@ -367,25 +367,3 @@ def append_score_log(
         }
     )
     log_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
-
-
-def prune_old_runs(*, runs_dir: Path = RUNS_DIR, now: datetime | None = None) -> list[str]:
-    """Delete live run directories older than `RETENTION_DAYS`; return the run_ids removed.
-
-    Only touches `runs_dir`'s direct children whose name is a run_id
-    timestamp — `runs/experiments/` and `runs/harness/` are local, developer-
-    driven artifacts with their own lifecycle and are left alone (issue #68
-    scopes this to the daily live run's disk growth).
-    """
-    if not runs_dir.exists():
-        return []
-    now = now or datetime.now(timezone.utc)
-    removed = []
-    for child in runs_dir.iterdir():
-        if not child.is_dir():
-            continue
-        age = _run_id_age_days(child.name, now=now)
-        if age is not None and age > RETENTION_DAYS:
-            shutil.rmtree(child)
-            removed.append(child.name)
-    return removed

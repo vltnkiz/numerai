@@ -24,10 +24,8 @@ from zemir.config import (
     build_trainers,
 )
 from zemir.pipeline import (
-    RETENTION_DAYS,
     ValidationScoreBelowThreshold,
     append_score_log,
-    prune_old_runs,
     run_pipeline,
     submit_predictions,
 )
@@ -82,10 +80,6 @@ def main() -> None:
         combined_validation_score=result.combined_validation_score,
         submission_id=submission.submission_id if submission else None,
     )
-    removed = prune_old_runs()
-    if removed:
-        print(f"pruned {len(removed)} run dir(s) past the {RETENTION_DAYS}-day retention window")
-
     if below_gate:
         raise ValidationScoreBelowThreshold(
             f"validation mean_corr {result.combined_validation_score.mean_corr:.4f} < "
