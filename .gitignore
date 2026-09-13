@@ -12,7 +12,8 @@ research/example-scripts/
 *.feather
 *.joblib
 
-# Python
+# Python (the live run's venv lives at the repo root, issue #69)
+.venv/
 __pycache__/
 *.py[cod]
 *.egg-info/

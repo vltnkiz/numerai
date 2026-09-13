@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -13,11 +12,7 @@ import pyarrow as pa
 from dotenv import load_dotenv
 from numerapi import NumerAPI
 
-from zemir.config import (
-    ROUND_OPEN_MAX_WAIT_SECONDS,
-    ROUND_OPEN_POLL_INTERVAL_SECONDS,
-    PipelineConfig,
-)
+from zemir.config import PipelineConfig
 from zemir.data import download
 from zemir.models import Trainer
 from zemir.scoring import (
@@ -34,17 +29,10 @@ SCORE_LOG_PATH = REPO_ROOT / "prod" / "zemir_01" / "score_log.jsonl"
 
 # Issue #68: how long a live run's scores stay in the committed history log.
 # Run directories on disk (gitignored, ~100 MB/run) are kept indefinitely —
-# the self-hosted box has ~941 GB free, so pruning them isn't worth the code.
+# the machine running the live job has hundreds of GB free, so pruning them
+# isn't worth the code.
 RETENTION_DAYS = 365
 _RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
-
-
-class ValidationScoreBelowThreshold(RuntimeError):
-    pass
-
-
-class RoundNotOpen(RuntimeError):
-    pass
 
 
 @dataclass
@@ -109,39 +97,6 @@ def _load_numerai_models(env: dict[str, str] | None = None) -> dict[str, str]:
     return models
 
 
-def wait_for_round_open(
-    *,
-    napi: NumerAPI | None = None,
-    poll_interval_seconds: int = ROUND_OPEN_POLL_INTERVAL_SECONDS,
-    max_wait_seconds: int = ROUND_OPEN_MAX_WAIT_SECONDS,
-    sleep=time.sleep,
-) -> None:
-    """Block until Numerai's current round is open, then return.
-
-    Issue #33: round open/close wall-clock timing is not a documented Numerai
-    guarantee (their docs disclaim an upper bound on open-time slippage), so
-    rather than trust a fixed cron offset to land after live features are
-    published, the live entrypoint polls instead. Raises past
-    `max_wait_seconds` rather than proceeding into a `download()` that would
-    fetch stale live data — same fail-loud posture as `submit_predictions`'s
-    validation-score gate.
-
-    Not called from `run_pipeline`: only scripts/run_pipeline.py — the live
-    entrypoint — needs to wait on round state. run_experiment.py's harness
-    path must keep running regardless of live round timing.
-    """
-    napi = napi or NumerAPI()
-    waited_seconds = 0
-    while not napi.check_round_open():
-        if waited_seconds >= max_wait_seconds:
-            raise RoundNotOpen(
-                f"round still not open after waiting {waited_seconds}s "
-                f"(max {max_wait_seconds}s)"
-            )
-        sleep(poll_interval_seconds)
-        waited_seconds += poll_interval_seconds
-
-
 def submit_predictions(
     predictions: pd.Series,
     *,
@@ -153,7 +108,7 @@ def submit_predictions(
 
     Deliberately not called by `run_pipeline`: an experiment that imports the
     pipeline cannot fire a live submission by forgetting a flag. Only
-    scripts/run_pipeline.py — the entrypoint the scheduled workflow invokes —
+    scripts/run_pipeline.py — the entrypoint the scheduled task invokes —
     calls this.
     """
     load_dotenv()
