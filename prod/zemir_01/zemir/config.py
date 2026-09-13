@@ -64,14 +64,23 @@ MODEL_NAMES = ["linear", "era_boost", "ensemble"]
 
 # Issue #33: round open/close wall-clock timing is not a documented Numerai
 # guarantee (their docs disclaim an upper bound on open-time slippage), so
-# rather than guess a safe cron offset, scripts/run_pipeline.py polls
-# `NumerAPI.check_round_open()` before downloading live data. Observed slip
-# on recent rounds topped out at ~12 min past the nominal 12:00 UTC open;
+# rather than guess a safe trigger offset, the live run polls Numerai's current
+# round before downloading live data (zemir.schedule.round_to_run). Observed
+# slip on recent rounds topped out at ~12 min past the nominal 12:00 UTC open;
 # this budget is generous well past that. Read only by scripts/run_pipeline.py
 # — the one entrypoint gated on round timing (run_experiment.py's harness
 # path always runs, regardless of live round state).
 ROUND_OPEN_POLL_INTERVAL_SECONDS = 120
 ROUND_OPEN_MAX_WAIT_SECONDS = 45 * 60
+
+# Issue #69: the live fit on Windows peaked at 43.2 GiB resident (full-scale
+# `medium` ensemble, sampled every 5 s) — about twice issue #44's 21.48 GiB,
+# which measured the linear stage alone. The machine now doubles as a desktop,
+# so scripts/run_pipeline.py refuses to *start* a fit with less than this
+# available, leaving ~3 GiB headroom: a clean, retried skip beats paging for an
+# hour or a MemoryError fifteen minutes in. Re-measure when the feature set,
+# models or training eras change.
+MIN_AVAILABLE_MEMORY_GIB = 46
 
 
 @dataclass(frozen=True)
