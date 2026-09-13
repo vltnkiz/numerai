@@ -29,8 +29,9 @@ from pathlib import Path
 from numerapi import NumerAPI
 
 from zemir.config import ROUND_OPEN_MAX_WAIT_SECONDS, ROUND_OPEN_POLL_INTERVAL_SECONDS
+from zemir.pipeline import RUNS_DIR
 
-ROUND_MARKERS_DIR = Path(__file__).resolve().parents[1] / "runs" / "rounds"
+ROUND_MARKERS_DIR = RUNS_DIR / "rounds"
 
 # Numerai Classic opens a round Tuesday-Saturday at a nominal 12:00 UTC
 # (`datetime.weekday()`: Monday is 0). Only used to bound *waiting* — whether
@@ -40,6 +41,10 @@ NOMINAL_ROUND_OPEN_HOUR_UTC = 12
 # A trigger scheduled for 12:00:00 can fire a moment early; don't let that
 # turn the one invocation that is supposed to wait into one that exits.
 _WAIT_WINDOW_EARLY_SLACK = timedelta(minutes=5)
+# Inside the wait window, a current round that opened longer than this before
+# today's nominal open is an earlier day's round (rounds open a day or more
+# apart). Generous either way, so a round that opens a little early still counts.
+_STALE_ROUND_CUTOFF = timedelta(hours=12)
 
 SUBMITTED = "submitted"
 GATE_FAILED = "gate_failed"
@@ -151,21 +156,40 @@ def round_to_run(
     Inside the nominal-open wait window, polls until an unfinished round opens,
     raising `RoundNotOpen` at the window's end — issue #33's fail-loud posture,
     since that is the one time a round is expected and missing.
+
+    Inside the window only today's round counts. An unfinished round from an
+    earlier day is left for a later trigger: fitting it now would see today's
+    round open mid-fit, throw the fit away, and — since the task never starts a
+    second instance — leave nothing running to catch today's round.
     """
     deadline = wait_deadline(clock())
+    earliest_open = (
+        None
+        if deadline is None
+        else deadline - timedelta(seconds=ROUND_OPEN_MAX_WAIT_SECONDS) - _STALE_ROUND_CUTOFF
+    )
     while True:
         current = fetch_current_round(napi)
         now = clock()
+        stale = (
+            current is not None and earliest_open is not None and current.open_time < earliest_open
+        )
         if (
             current is not None
             and current.open_time <= now
+            and not stale
             and not is_round_done(current.number, markers_dir=markers_dir)
         ):
             return current
         if deadline is None:
             return None
         if now >= deadline:
-            latest = f"round {current.number} already finished" if current else "no current round"
+            if current is None:
+                latest = "no current round"
+            elif is_round_done(current.number, markers_dir=markers_dir):
+                latest = f"round {current.number} already finished"
+            else:
+                latest = f"round {current.number} opened before today"
             raise RoundNotOpen(
                 f"no unfinished round opened by {deadline.isoformat()} ({latest})"
             )
