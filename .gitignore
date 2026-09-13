@@ -1,3 +1,6 @@
+#Docs 
+docs/
+
 # Datasets (large, downloaded on demand by zemir/data.py)
 datasets/
 
