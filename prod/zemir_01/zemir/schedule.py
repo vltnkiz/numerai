@@ -29,8 +29,9 @@ from pathlib import Path
 from numerapi import NumerAPI
 
 from zemir.config import ROUND_OPEN_MAX_WAIT_SECONDS, ROUND_OPEN_POLL_INTERVAL_SECONDS
+from zemir.pipeline import RUNS_DIR
 
-ROUND_MARKERS_DIR = Path(__file__).resolve().parents[1] / "runs" / "rounds"
+ROUND_MARKERS_DIR = RUNS_DIR / "rounds"
 
 # Numerai Classic opens a round Tuesday-Saturday at a nominal 12:00 UTC
 # (`datetime.weekday()`: Monday is 0). Only used to bound *waiting* — whether
@@ -40,6 +41,10 @@ NOMINAL_ROUND_OPEN_HOUR_UTC = 12
 # A trigger scheduled for 12:00:00 can fire a moment early; don't let that
 # turn the one invocation that is supposed to wait into one that exits.
 _WAIT_WINDOW_EARLY_SLACK = timedelta(minutes=5)
+# Inside the wait window, a current round that opened longer than this before
+# today's nominal open is an earlier day's round (rounds open a day or more
+# apart). Generous either way, so a round that opens a little early still counts.
+_STALE_ROUND_CUTOFF = timedelta(hours=12)
 
 SUBMITTED = "submitted"
 GATE_FAILED = "gate_failed"
@@ -161,7 +166,7 @@ def round_to_run(
     earliest_open = (
         None
         if deadline is None
-        else deadline - timedelta(seconds=ROUND_OPEN_MAX_WAIT_SECONDS) - _WAIT_WINDOW_EARLY_SLACK
+        else deadline - timedelta(seconds=ROUND_OPEN_MAX_WAIT_SECONDS) - _STALE_ROUND_CUTOFF
     )
     while True:
         current = fetch_current_round(napi)

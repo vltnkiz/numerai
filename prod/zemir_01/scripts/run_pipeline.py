@@ -73,11 +73,6 @@ def main() -> int:
         return 0
     # The wrapper keys failure issues on this line.
     print(f"ZEMIR_ROUND={live_round.number}")
-    if live_round.is_late(datetime.now(timezone.utc)):
-        print(
-            f"WARNING: round {live_round.number} staking closed at "
-            f"{live_round.close_staking_time.isoformat()} — submitting late (scored, unstaked)"
-        )
 
     try:
         require_available_memory(MIN_AVAILABLE_MEMORY_GIB)
@@ -105,14 +100,23 @@ def main() -> int:
     # pipeline, which cannot submit and so has nothing to stop.
     below_gate = result.combined_validation_score.mean_corr < MIN_VALIDATION_MEAN_CORR
     # A new round opening mid-fit would receive predictions made from the
-    # previous round's live features. Not a final outcome: the next trigger
-    # runs the new round from scratch.
+    # previous round's live features. Not a final outcome: the wrapper reruns
+    # for the new round. No current round at all (a between-rounds gap or an
+    # API error) is not a change — the upload then fails loudly instead of the
+    # run skipping quietly.
     round_changed = False
     submission = None
     if not below_gate:
         current = fetch_current_round(napi)
-        round_changed = current is None or current.number != live_round.number
+        round_changed = current is not None and current.number != live_round.number
         if not round_changed:
+            # Checked here, not before the fit: a fit can run past staking close.
+            if live_round.is_late(datetime.now(timezone.utc)):
+                print(
+                    f"WARNING: round {live_round.number} staking closed at "
+                    f"{live_round.close_staking_time.isoformat()} — submitting late "
+                    "(scored, unstaked)"
+                )
             submission = submit_predictions(
                 result.live_predictions_neutralized.rename("prediction"),
                 model_slot=SUBMISSION_MODEL_SLOT,

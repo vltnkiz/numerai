@@ -142,6 +142,15 @@ def test_noon_trigger_waits_for_todays_round_over_an_unfinished_stale_one(tmp_pa
     assert clock.sleeps == [120, 120, 120]
 
 
+def test_noon_trigger_takes_todays_round_even_if_it_opened_early(tmp_path):
+    record_round_outcome(1354, SUBMITTED, run_id="r", markers_dir=tmp_path)
+    opened_early = TUESDAY_NOON - timedelta(minutes=10)
+    clock = FakeClock(TUESDAY_NOON)
+    found = run(clock, lambda now: tuesday_round(opened_early), tmp_path)
+    assert found.number == 1355
+    assert clock.sleeps == []
+
+
 def test_noon_trigger_fails_loudly_when_only_a_stale_round_is_open(tmp_path):
     clock = FakeClock(TUESDAY_NOON)
     with pytest.raises(RoundNotOpen, match="round 1354 opened before today"):
