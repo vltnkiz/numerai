@@ -151,21 +151,40 @@ def round_to_run(
     Inside the nominal-open wait window, polls until an unfinished round opens,
     raising `RoundNotOpen` at the window's end — issue #33's fail-loud posture,
     since that is the one time a round is expected and missing.
+
+    Inside the window only today's round counts. An unfinished round from an
+    earlier day is left for a later trigger: fitting it now would see today's
+    round open mid-fit, throw the fit away, and — since the task never starts a
+    second instance — leave nothing running to catch today's round.
     """
     deadline = wait_deadline(clock())
+    earliest_open = (
+        None
+        if deadline is None
+        else deadline - timedelta(seconds=ROUND_OPEN_MAX_WAIT_SECONDS) - _WAIT_WINDOW_EARLY_SLACK
+    )
     while True:
         current = fetch_current_round(napi)
         now = clock()
+        stale = (
+            current is not None and earliest_open is not None and current.open_time < earliest_open
+        )
         if (
             current is not None
             and current.open_time <= now
+            and not stale
             and not is_round_done(current.number, markers_dir=markers_dir)
         ):
             return current
         if deadline is None:
             return None
         if now >= deadline:
-            latest = f"round {current.number} already finished" if current else "no current round"
+            if current is None:
+                latest = "no current round"
+            elif is_round_done(current.number, markers_dir=markers_dir):
+                latest = f"round {current.number} already finished"
+            else:
+                latest = f"round {current.number} opened before today"
             raise RoundNotOpen(
                 f"no unfinished round opened by {deadline.isoformat()} ({latest})"
             )

@@ -86,14 +86,17 @@ function Publish-Failure([string]$failureType) {
         $tail
         '```'
     ) -join "`n" | Out-File $bodyFile -Encoding utf8
+    # Native failures don't throw under 'Continue', so each gh call's exit code is checked.
     try {
-        $existing = gh issue list --state open --search "`"$title`" in:title" --json number,title |
-            ConvertFrom-Json | Where-Object { $_.title -eq $title } | Select-Object -First 1
+        $listed = gh issue list --state open --search "`"$title`" in:title" --json number,title
+        if ($LASTEXITCODE -ne 0) { throw "gh issue list exited $LASTEXITCODE" }
+        $existing = $listed | ConvertFrom-Json | Where-Object { $_.title -eq $title } | Select-Object -First 1
         if ($existing) {
             gh issue comment $existing.number --body-file $bodyFile | Out-Null
         } else {
             gh issue create --title $title --label bug --body-file $bodyFile | Out-Null
         }
+        if ($LASTEXITCODE -ne 0) { throw "gh exited $LASTEXITCODE" }
     } catch {
         Write-Log "could not publish the failure to GitHub: $_"
     }
@@ -129,6 +132,13 @@ if ((Invoke-Logged "`"$uv`" pip install --python `"$python`" -e prod\zemir_01") 
 $script = if ($DryRun) { 'scripts\run_experiment.py --model ensemble --smoke' } else { 'scripts\run_pipeline.py --model ensemble' }
 $exitCode = Invoke-Logged "cd /d `"$zemir`" && `"$python`" -u $script"
 Write-Log "pipeline exit code $exitCode"
+# Round changed mid-fit (e.g. a logon just before noon fitting a stale round):
+# the new round is open and unfinished, and the task never starts a second
+# instance to catch it, so run again now. live.parquet is re-downloaded.
+if (-not $DryRun -and $exitCode -eq 5) {
+    $exitCode = Invoke-Logged "cd /d `"$zemir`" && `"$python`" -u $script"
+    Write-Log "pipeline exit code $exitCode (rerun for the new round)"
+}
 
 if ($DryRun) {
     exit $exitCode

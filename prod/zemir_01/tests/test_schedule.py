@@ -128,6 +128,26 @@ def test_noon_trigger_fails_loudly_when_no_round_opens_in_the_window(tmp_path):
     assert clock.now >= TUESDAY_NOON + timedelta(minutes=45)
 
 
+def test_noon_trigger_waits_for_todays_round_over_an_unfinished_stale_one(tmp_path):
+    # Saturday's round was never finished (machine off since). Fitting it at
+    # noon would see today's round open mid-fit and throw the fit away.
+    opens_at = TUESDAY_NOON + timedelta(minutes=5)
+
+    def rounds_at(now):
+        return tuesday_round(opens_at) if now >= opens_at else saturday_round()
+
+    clock = FakeClock(TUESDAY_NOON)
+    found = run(clock, rounds_at, tmp_path)
+    assert found.number == 1355
+    assert clock.sleeps == [120, 120, 120]
+
+
+def test_noon_trigger_fails_loudly_when_only_a_stale_round_is_open(tmp_path):
+    clock = FakeClock(TUESDAY_NOON)
+    with pytest.raises(RoundNotOpen, match="round 1354 opened before today"):
+        run(clock, lambda now: saturday_round(), tmp_path)
+
+
 def test_between_rounds_gap_keeps_polling_inside_the_window(tmp_path):
     opens_at = TUESDAY_NOON + timedelta(minutes=3)
 

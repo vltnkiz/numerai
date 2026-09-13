@@ -49,6 +49,8 @@ job 3–5 h late, after weekday staking had closed.
   wait for a new round, polling every 2 min. If nothing opens, it fails loudly
   (issue #33: Numerai disclaims any bound on open-time slippage). Anywhere
   else it checks once and exits, so a logon at 08:00 doesn't sleep until noon.
+  Inside the window only today's round counts: an unfinished round from an
+  earlier day is left for a later trigger, so it doesn't use up the noon run.
 - **Late rounds are still submitted:** after `closeStakingTime` Numerai scores
   an upload but won't stake it, and also queues it for the next round. This is
   also why the round check uses `rounds(number: 0)` rather than
@@ -59,7 +61,8 @@ job 3–5 h late, after weekday staking had closed.
   leaves no marker, and the next trigger retries.
 - **Round changes mid-run:** if a new round opens during the fit, the
   predictions are not uploaded, because they were made from the previous
-  round's live features.
+  round's live features. The wrapper then runs the pipeline once more for the
+  new round, since the task won't start a second instance to pick it up.
 
 ### Guards and alerts
 
