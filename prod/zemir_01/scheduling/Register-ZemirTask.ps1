@@ -13,7 +13,8 @@ Triggers (any number of invocations is safe - zemir.schedule decides whether
 there is a round to run):
   - Daily at 12:00 UTC, waking the machine, and starting as soon as possible
     after a missed start (the machine was off or asleep). No boot trigger:
-    Fast Startup makes a power-on a hibernate-resume, which never fires one.
+    the missed-start catch-up covers a late power-on, and with Fast Startup
+    on a power-on is a hibernate-resume, which never fires one.
   - At your logon, as a backup catch-up.
 #>
 param([string]$TaskName = 'zemir_01 live run')

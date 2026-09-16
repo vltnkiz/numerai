@@ -35,14 +35,19 @@ job 3–5 h late, after weekday staking had closed.
 | --- | --- |
 | `scheduling/Register-ZemirTask.ps1` | Registers the task. Run once, interactively; it asks for your Windows password. |
 | `scheduling/Invoke-ZemirLiveRun.ps1` | What the task runs: checks, pull, install, pipeline, score-log push, failure issues. `-DryRun` smoke-tests the same path without submitting. |
-| `scheduling/Suspend-AfterRun.ps1` | After a run the machine was woken for: prompts on screen, then puts it back to sleep. `-NoSleep` shows the prompt without sleeping. |
+| `scheduling/Stop-AfterRun.ps1` | After each run: shuts the PC down if nobody is logged on, or prompts first if the PC was woken for the run. `-NoShutdown` decides and prompts without shutting down. |
 | `zemir/schedule.py` | Decides whether an invocation has a round to run. |
 
 ### When it runs
 
 - **Triggers:** daily at 12:00 UTC, waking the machine and starting as soon as
-  possible after a missed start, plus at logon. There's no boot trigger:
-  Fast Startup turns power-on into a hibernate-resume, which never fires one.
+  possible after a missed start, plus at logon. There's no boot trigger. The
+  daily trigger's missed-start catch-up already covers a late power-on. And
+  with Fast Startup on, a power-on is a hibernate-resume, which never fires one.
+- **Powered off overnight:** the PC is shut down, not left asleep. The BIOS
+  alarm powers it on shortly before 12:00 UTC, and the daily trigger runs at
+  the logon screen with nobody logged on (see
+  [Powering on for the run](#powering-on-for-the-run)).
 - **Deciding whether to run:** every invocation asks Numerai for the current
   round and runs if this machine hasn't finished it. Extra triggers are
   harmless; the second one just exits 0.
@@ -76,13 +81,20 @@ job 3–5 h late, after weekday staking had closed.
   (`LinearRegression` upcasting the int8 design matrix to float64).
 - **Priority and sleep:** the pipeline runs at BelowNormal priority, and the
   machine is kept awake while it runs.
-- **Back to sleep:** when the task's wake timer woke the machine for the run,
-  `scheduling/Suspend-AfterRun.ps1` shows a prompt on screen once the run ends
-  (however it ends). OK or no answer within 2 min puts the machine back to
-  sleep; Cancel keeps it awake, as does a prompt that couldn't be shown. It
-  runs detached, so the task has already ended when the machine sleeps; an
-  instance still running at the next wake would get that day's trigger
-  ignored. Runs started any other way (logon, by hand) never prompt.
+- **Shut down afterwards:** once a run ends (however it ends),
+  `scheduling/Stop-AfterRun.ps1` decides:
+  - Nobody logged on at the console: it shuts down. This is the BIOS-alarm
+    morning.
+  - Someone logged on and the task's wake timer woke the PC from sleep: it
+    prompts on screen. OK or no answer within 2 min shuts down. Cancel keeps
+    the PC on, and so does a prompt that couldn't be shown.
+  - Anyone logged on otherwise (logon run, run by hand, logged on mid-run): the
+    PC stays on.
+
+  The shutdown is a full one (`shutdown /s`, not Fast Startup's hibernate) and
+  isn't forced, so unsaved work can hold it up. The script runs detached and
+  waits for the run's process to exit, so the task's result is recorded first.
+  Dry runs never shut down.
 - **Failure issues:** any failure opens a GitHub issue titled
   `Live run failed: <type> (round N)`, with the log tail. A repeat for the same
   type and round comments on the existing issue. Exit codes 2–5 from
@@ -106,6 +118,35 @@ job 3–5 h late, after weekday staking had closed.
 - **Timing:** the full `medium` ensemble takes about 22 min on this machine
   with the live download included (issue #69's parity run). The task's 150-min
   limit covers the 45-min wait plus a fit, with room to spare.
+
+### Powering on for the run
+
+Windows can't wake a PC that is shut down, so the BIOS does it. On this board
+(Gigabyte X570S AORUS PRO AX), go to **Settings → Platform Power**:
+
+- **ErP Ready:** Disabled. ErP cuts power to the RTC wake.
+- **Resume by Alarm:** Enabled. Wake up day `0` (every day), and a time about
+  10 min before 12:00 UTC.
+
+The alarm reads the hardware clock, and Windows keeps that on **local** time.
+So the setting drifts by an hour at each DST change:
+
+| Period | Alarm (Paris time) | = UTC |
+| --- | --- | --- |
+| Summer time (late Mar – late Oct) | 13:50 | 11:50 |
+| Winter time (late Oct – late Mar) | 12:50 | 11:50 |
+
+Don't just leave 13:50 all year. In winter that powers on at 12:50 UTC, the
+run finishes around 13:15, and staking closes around 13:07, so the round is
+submitted late and unstaked. Leaving 12:50 all year is safe. The cost is the
+PC sitting idle at the logon screen for about 70 min on summer mornings.
+
+Also turn Fast Startup off, so Start → Shut down really powers off, and the
+alarm isn't fighting a hibernated Windows. From an elevated prompt:
+
+```powershell
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f
+```
 
 ### Setup on a fresh checkout
 
