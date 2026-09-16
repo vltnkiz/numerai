@@ -17,8 +17,13 @@ a submission of work in progress.
 Smoke-run the same path without submitting (run_experiment.py --smoke): checks
 the checkout, pull, install and Python environment, not the scores. Never
 commits, writes round markers, or opens issues.
+
+.PARAMETER TaskName
+The scheduled task this runs as. When its wake timer woke the machine for this
+run, Suspend-AfterRun.ps1 asks on screen afterwards and goes back to sleep
+unless told not to.
 #>
-param([switch]$DryRun)
+param([switch]$DryRun, [string]$TaskName = 'zemir_01 live run')
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -102,6 +107,18 @@ function Publish-Failure([string]$failureType) {
     }
 }
 
+# Every exit goes through here. The sleep prompt runs detached, so this task has
+# ended before the machine sleeps.
+function Exit-Run([int]$code) {
+    if ($woken) {
+        Write-Log 'woken for this run: starting the sleep prompt'
+        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList (
+            "-NoProfile -NonInteractive -ExecutionPolicy Bypass " +
+            "-File `"$(Join-Path $PSScriptRoot 'Suspend-AfterRun.ps1')`" -Log `"$log`"")
+    }
+    exit $code
+}
+
 # Keep the machine awake while this process lives; Windows drops the request on exit.
 $power = Add-Type -Name Power -Namespace ZemirLiveRun -PassThru -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);
@@ -113,19 +130,25 @@ $env:PYTHONUTF8 = '1'
 
 Write-Log "zemir_01 scheduled run$(if ($DryRun) { ' (dry run)' }) in $repo"
 
+# Did this task's wake timer bring the machine out of sleep? The wake event names
+# the task ("NT TASK\<name>") whatever the display language.
+$woken = Get-WinEvent -MaxEvents 1 -ErrorAction SilentlyContinue -FilterHashtable @{
+    LogName = 'System'; ProviderName = 'Microsoft-Windows-Power-Troubleshooter'; Id = 1; StartTime = (Get-Date).AddMinutes(-15)
+} | Where-Object { $_.Message -like "*NT TASK\$TaskName*" }
+
 $branch = (git symbolic-ref --short HEAD 2>$null)
 $dirty = (git status --porcelain)
 if ($branch -ne 'main' -or $dirty) {
     Write-Log "checkout is on '$branch' with $(@($dirty).Count) uncommitted change(s)"
     Publish-Failure 'checkout is not a clean main'
-    exit 1
+    Exit-Run 1
 }
-if ((Invoke-Logged 'git pull --ff-only') -ne 0) { Publish-Failure 'git pull failed'; exit 1 }
+if ((Invoke-Logged 'git pull --ff-only') -ne 0) { Publish-Failure 'git pull failed'; Exit-Run 1 }
 
 $uv = Resolve-Uv
 if ((Invoke-Logged "`"$uv`" pip install --python `"$python`" -e prod\zemir_01") -ne 0) {
     Publish-Failure 'dependency install failed'
-    exit 1
+    Exit-Run 1
 }
 & $uv pip freeze --python $python 2>$null | Out-File (Join-Path $logDir 'pip_freeze.txt') -Encoding utf8
 
@@ -141,7 +164,7 @@ if (-not $DryRun -and $exitCode -eq 5) {
 }
 
 if ($DryRun) {
-    exit $exitCode
+    Exit-Run $exitCode
 }
 
 # Whatever the pipeline's outcome - a gate failure still appends its scores (issue #68).
@@ -159,4 +182,4 @@ if ($exitCode -ne 0) {
     $failureType = if ($pipelineFailures.ContainsKey($exitCode)) { $pipelineFailures[$exitCode] } else { "pipeline crashed (exit $exitCode)" }
     Publish-Failure $failureType
 }
-exit $exitCode
+Exit-Run $exitCode

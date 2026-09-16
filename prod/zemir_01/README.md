@@ -35,6 +35,7 @@ job 3–5 h late, after weekday staking had closed.
 | --- | --- |
 | `scheduling/Register-ZemirTask.ps1` | Registers the task. Run once, interactively; it asks for your Windows password. |
 | `scheduling/Invoke-ZemirLiveRun.ps1` | What the task runs: checks, pull, install, pipeline, score-log push, failure issues. `-DryRun` smoke-tests the same path without submitting. |
+| `scheduling/Suspend-AfterRun.ps1` | After a run the machine was woken for: prompts on screen, then puts it back to sleep. `-NoSleep` shows the prompt without sleeping. |
 | `zemir/schedule.py` | Decides whether an invocation has a round to run. |
 
 ### When it runs
@@ -75,6 +76,13 @@ job 3–5 h late, after weekday staking had closed.
   (`LinearRegression` upcasting the int8 design matrix to float64).
 - **Priority and sleep:** the pipeline runs at BelowNormal priority, and the
   machine is kept awake while it runs.
+- **Back to sleep:** when the task's wake timer woke the machine for the run,
+  `scheduling/Suspend-AfterRun.ps1` shows a prompt on screen once the run ends
+  (however it ends). OK or no answer within 2 min puts the machine back to
+  sleep; Cancel keeps it awake, as does a prompt that couldn't be shown. It
+  runs detached, so the task has already ended when the machine sleeps; an
+  instance still running at the next wake would get that day's trigger
+  ignored. Runs started any other way (logon, by hand) never prompt.
 - **Failure issues:** any failure opens a GitHub issue titled
   `Live run failed: <type> (round N)`, with the log tail. A repeat for the same
   type and round comments on the existing issue. Exit codes 2–5 from
