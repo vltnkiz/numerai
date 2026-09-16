@@ -16,12 +16,12 @@ a submission of work in progress.
 .PARAMETER DryRun
 Smoke-run the same path without submitting (run_experiment.py --smoke): checks
 the checkout, pull, install and Python environment, not the scores. Never
-commits, writes round markers, or opens issues.
+commits, writes round markers, opens issues, or shuts the PC down.
 
 .PARAMETER TaskName
-The scheduled task this runs as. When its wake timer woke the machine for this
-run, Suspend-AfterRun.ps1 asks on screen afterwards and goes back to sleep
-unless told not to.
+The scheduled task this runs as, to tell whether its wake timer woke the PC
+for this run. Afterwards Stop-AfterRun.ps1 shuts the PC down if nobody is
+logged on, or asks on screen first if they are and the PC was woken for the run.
 #>
 param([switch]$DryRun, [string]$TaskName = 'zemir_01 live run')
 
@@ -107,15 +107,13 @@ function Publish-Failure([string]$failureType) {
     }
 }
 
-# Every exit goes through here. The sleep prompt runs detached, so this task has
-# ended before the machine sleeps.
+# Every exit goes through here. Stop-AfterRun.ps1 runs detached and waits for
+# this process, so this task has ended before the PC shuts down.
 function Exit-Run([int]$code) {
-    if ($woken) {
-        Write-Log 'woken for this run: starting the sleep prompt'
-        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList (
-            "-NoProfile -NonInteractive -ExecutionPolicy Bypass " +
-            "-File `"$(Join-Path $PSScriptRoot 'Suspend-AfterRun.ps1')`" -Log `"$log`"")
-    }
+    $flags = "$(if ($woken) { ' -Woken' })$(if ($DryRun) { ' -NoShutdown' })"
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList (
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass " +
+        "-File `"$(Join-Path $PSScriptRoot 'Stop-AfterRun.ps1')`" -Log `"$log`" -RunPid $PID$flags")
     exit $code
 }
 
