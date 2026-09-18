@@ -10,8 +10,9 @@ round to run at all is decided in Python (zemir.schedule), so this is safe to
 start from any trigger, any number of times.
 
 Runs against this checkout directly, not a separate clone: a day this checkout
-is on another branch or has uncommitted changes is a failed, retried run, never
-a submission of work in progress.
+is on another branch or has uncommitted changes to tracked files is a failed,
+retried run, never a submission of work in progress. Untracked files are
+ignored - they are litter beside the checkout, not work the pipeline runs.
 
 .PARAMETER DryRun
 Smoke-run the same path without submitting (run_experiment.py --smoke): checks
@@ -93,7 +94,11 @@ function Publish-Failure([string]$failureType) {
     ) -join "`n" | Out-File $bodyFile -Encoding utf8
     # Native failures don't throw under 'Continue', so each gh call's exit code is checked.
     try {
-        $listed = gh issue list --state open --search "`"$title`" in:title" --json number,title
+        # Listed by label rather than searched by title: PowerShell 5.1 mangles the
+        # embedded quotes a `--search "`"title`" in:title"` needs, and gh rejects the
+        # argument it ends up with, so every failure went unreported. The exact-title
+        # match below is what picks the issue out either way.
+        $listed = gh issue list --state open --label bug --limit 100 --json number,title
         if ($LASTEXITCODE -ne 0) { throw "gh issue list exited $LASTEXITCODE" }
         $existing = $listed | ConvertFrom-Json | Where-Object { $_.title -eq $title } | Select-Object -First 1
         if ($existing) {
@@ -135,7 +140,10 @@ $woken = Get-WinEvent -MaxEvents 1 -ErrorAction SilentlyContinue -FilterHashtabl
 } | Where-Object { $_.Message -like "*NT TASK\$TaskName*" }
 
 $branch = (git symbolic-ref --short HEAD 2>$null)
-$dirty = (git status --porcelain)
+# Tracked changes only. An untracked file is something left beside the checkout,
+# not work in progress the pipeline would pick up, and counting it cost a run a
+# day for two days (a stray architecture-review.html sitting in the repo root).
+$dirty = (git status --porcelain --untracked-files=no)
 if ($branch -ne 'main' -or $dirty) {
     Write-Log "checkout is on '$branch' with $(@($dirty).Count) uncommitted change(s)"
     Publish-Failure 'checkout is not a clean main'
