@@ -120,7 +120,7 @@ job 3–5 h late, after weekday staking had closed.
   8.4 GB every day. For the same reason, never `git clean -x` this checkout.
 - **Timing:** the full `medium` ensemble takes about 22 min on this machine
   with the live download included (issue #69's parity run). The task's 150-min
-  limit covers the 45-min wait plus a fit, with room to spare.
+  limit covers the 90-min wait plus a fit, with room to spare.
 
 ### Powering on for the run
 

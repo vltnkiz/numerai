@@ -63,13 +63,15 @@ MIN_VALIDATION_MEAN_CORR = 0.001
 # Issue #33: round open/close wall-clock timing is not a documented Numerai
 # guarantee (their docs disclaim an upper bound on open-time slippage), so
 # rather than guess a safe trigger offset, the live run polls Numerai's current
-# round before downloading live data (zemir.schedule.round_to_run). Observed
-# slip on recent rounds topped out at ~12 min past the nominal 12:00 UTC open;
-# this budget is generous well past that. Read only by zemir.schedule, on
+# round before downloading live data (zemir.schedule.round_to_run). Slip topped
+# out at ~12 min on the rounds first observed, but round 1359 (2026-09-19)
+# opened at 13:04 UTC, 64 min late, after a 45-min budget had given up. 90 min
+# covers that with margin and still leaves the task's 150-min limit room for a
+# ~22-min fit (a 120-min budget would not). Read only by zemir.schedule, on
 # behalf of scripts/run_pipeline.py — the one entrypoint gated on round timing
 # (run_experiment.py's harness path always runs, regardless of live round state).
 ROUND_OPEN_POLL_INTERVAL_SECONDS = 120
-ROUND_OPEN_MAX_WAIT_SECONDS = 45 * 60
+ROUND_OPEN_MAX_WAIT_SECONDS = 90 * 60
 
 # Issue #69: the live fit on Windows peaked at 43.2 GiB resident (full-scale
 # `medium` ensemble, sampled every 5 s) — about twice issue #44's 21.48 GiB,
