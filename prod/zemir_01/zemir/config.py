@@ -13,10 +13,10 @@ validation gate live here as plain constants rather than config fields, because
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
-from zemir.models import Trainer, train_linear, train_xgboost
 from zemir.neutralizer_ranking import MEDIUM_FEATURE_EXPOSURE_RANKING
+from zemir.strategy import BlendSpec, ModelSpec, Strategy
 
 # Issue #31: the loop measurably beats a plain single fit (`num_iters=0`) on
 # mean_corr/sharpe/smart_sharpe, so it ships as-is. `random_state` pinned only
@@ -60,8 +60,6 @@ SUBMISSION_MODEL_SLOT = "zemir_01"
 # numerai_corr, not this gate's spearman-based mean_corr.
 MIN_VALIDATION_MEAN_CORR = 0.001
 
-MODEL_NAMES = ["linear", "era_boost", "ensemble"]
-
 # Issue #33: round open/close wall-clock timing is not a documented Numerai
 # guarantee (their docs disclaim an upper bound on open-time slippage), so
 # rather than guess a safe trigger offset, the live run polls Numerai's current
@@ -104,50 +102,32 @@ class PipelineConfig:
     # untouched default (`target_ender_60` in v5.3) to the actual payout
     # target, `target_ender_20`.
     target_column: str = TARGET_COLUMN
-    # Full-blend neutralization, not the linear-only no-op 0.5 used to be:
-    # measured optimum is p=1.0 on the harness sweep (issue #29), backed off to
-    # 0.95 for margin against validate_predictions' zero-variance guard.
-    neutralization_proportion: float = 0.95
     max_eras: int | None = None  # None = every era
-    xgboost: Mapping[str, object] = field(
-        default_factory=lambda: dict(XGBOOST_HYPERPARAMS)
-    )
-    # None = equal weight (combine_predictions' default). Set per `--model` by
-    # MODEL_WEIGHTS below; a lone model ignores this entirely.
-    model_weights: Mapping[str, float] | None = None
-    # None = every training feature (pipeline.py's own no-argument default). Set
-    # per `--model` by NEUTRALIZERS below.
-    neutralizers: tuple[str, ...] | None = None
 
 
 LIVE = PipelineConfig()
 
 # Exercises the identical code path in seconds instead of an hour. Scores from a
 # SMOKE run are meaningless and must never be compared against a LIVE-scale one.
-SMOKE = replace(
-    LIVE,
-    max_eras=40,
-    xgboost={**XGBOOST_HYPERPARAMS, "num_iters": 2},
-)
+# The `num_iters=2` xgboost speed-up this used to layer on top of `max_eras=40`
+# lived on `PipelineConfig.xgboost`, which #77 removed — era_boost's iteration
+# count is now on the model's own `ModelSpec.params`, so `smoke()` below is
+# what applies it to whichever Strategy a run picks.
+SMOKE = replace(LIVE, max_eras=40)
 
 
-def build_trainers(model: str, config: PipelineConfig) -> dict[str, Trainer]:
-    """Trainers for one model choice, using `config`'s hyperparameters."""
+def smoke(strategy: Strategy) -> Strategy:
+    """`strategy`, with every model's `num_iters` (if it has one) forced to 2.
 
-    def linear(X, y, era):
-        return train_linear(X, y)
-
-    def era_boost(X, y, era):
-        return train_xgboost(X, y, era, **config.xgboost)
-
-    by_name: dict[str, dict[str, Trainer]] = {
-        "linear": {"linear": linear},
-        "era_boost": {"era_boost": era_boost},
-        "ensemble": {"linear": linear, "era_boost": era_boost},
-    }
-    if model not in by_name:
-        raise ValueError(f"unknown model {model!r} (have: {MODEL_NAMES})")
-    return by_name[model]
+    One definition of "smoke" that adapts to whatever specs a strategy holds
+    — not a parallel `SMOKE_STRATEGIES` table keyed like the tables #74/#77
+    deleted. A model with no `num_iters` (e.g. `ols`) is returned untouched.
+    """
+    models = tuple(
+        replace(m, params={**m.params, "num_iters": 2}) if "num_iters" in m.params else m
+        for m in strategy.models
+    )
+    return replace(strategy, models=models)
 
 
 # Measured by scripts/sweep_weights.py against runs/harness/20260825T194439Z-ensemble/
@@ -162,12 +142,6 @@ def build_trainers(model: str, config: PipelineConfig) -> dict[str, Trainer]:
 # -> weight}}, one entry per `build_trainers` model choice, rather than a
 # rewrite of the trainer selector.
 ENSEMBLE_MODEL_WEIGHTS: Mapping[str, float] = {"linear": 0.3, "era_boost": 0.7}
-
-MODEL_WEIGHTS: Mapping[str, Mapping[str, float] | None] = {
-    "linear": None,
-    "era_boost": None,
-    "ensemble": ENSEMBLE_MODEL_WEIGHTS,
-}
 
 # Re-measured by scripts/sweep_neutralizers.py against
 # runs/harness/20260905T205947Z-ensemble/ (780 features, 655 validation eras,
@@ -195,11 +169,49 @@ MODEL_WEIGHTS: Mapping[str, Mapping[str, float] | None] = {
 _NEUTRALIZER_K = 557
 ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = MEDIUM_FEATURE_EXPOSURE_RANKING[:_NEUTRALIZER_K]
 
-NEUTRALIZERS: Mapping[str, tuple[str, ...] | None] = {
-    "linear": None,
-    "era_boost": None,
-    "ensemble": ENSEMBLE_NEUTRALIZERS,
+# Which models, blended how. Replaces the three tables `MODEL_NAMES` used to
+# key — `build_trainers`'s `by_name`, `MODEL_WEIGHTS`, `NEUTRALIZERS` — with
+# one entry per named strategy; `ensemble` retires into `zemir_01`, `linear`
+# and `era_boost` keep their spellings verbatim (#74/#77). Each spec below
+# reads its values off the same measured constants the deleted tables did, so
+# the rationale comments stay attached to those constants rather than being
+# duplicated here.
+STRATEGIES: Mapping[str, Strategy] = {
+    "linear": Strategy(
+        models=(ModelSpec(name="linear", features="medium", trainer="ols"),),
+        blend=BlendSpec(proportion=0.95),
+    ),
+    "era_boost": Strategy(
+        models=(
+            ModelSpec(
+                name="era_boost",
+                features="medium",
+                trainer="xgboost",
+                params=XGBOOST_HYPERPARAMS,
+            ),
+        ),
+        blend=BlendSpec(proportion=0.95),
+    ),
+    "zemir_01": Strategy(
+        models=(
+            ModelSpec(name="linear", features="medium", trainer="ols"),
+            ModelSpec(
+                name="era_boost",
+                features="medium",
+                trainer="xgboost",
+                params=XGBOOST_HYPERPARAMS,
+            ),
+        ),
+        blend=BlendSpec(
+            weights=ENSEMBLE_MODEL_WEIGHTS,
+            neutralize=ENSEMBLE_NEUTRALIZERS,
+            proportion=0.95,
+        ),
+    ),
 }
+
+# The single line that decides what production ships.
+PRODUCTION_STRATEGY = STRATEGIES["zemir_01"]
 
 
 @dataclass(frozen=True)

@@ -6,9 +6,9 @@ Numerai Classic pipeline: download → train → combine → neutralize → rank
 
 | Command | Submits? | Artifacts |
 | --- | --- | --- |
-| `python scripts/run_pipeline.py --model linear` | **YES — uploads to the live `zemir_01` slot** | `runs/<run_id>/` |
-| `python scripts/run_experiment.py --model ensemble` | No | `runs/experiments/<run_id>-<model>/` |
-| `python scripts/run_experiment.py --model ensemble --smoke` | No | `runs/experiments/<run_id>-<model>-smoke/` |
+| `python scripts/run_pipeline.py` | **YES — uploads to the live `zemir_01` slot** | `runs/<run_id>/` |
+| `python scripts/run_experiment.py --strategy zemir_01` | No | `runs/experiments/<run_id>-<strategy>/` |
+| `python scripts/run_experiment.py --strategy zemir_01 --smoke` | No | `runs/experiments/<run_id>-<strategy>-smoke/` |
 
 Submission is not a flag on the pipeline — it is a separate function.
 `zemir.pipeline.run_pipeline` trains, scores, neutralizes and writes artifacts
@@ -19,8 +19,10 @@ experiment therefore cannot fire a live submission by forgetting a flag.
 The `MIN_VALIDATION_MEAN_CORR` gate lives with the submission it guards, in
 `scripts/run_pipeline.py` — not in the pipeline, which has nothing to stop.
 
-`scripts/run_pipeline.py --model ensemble` is what the Windows scheduled task
-runs — see [Scheduling](#scheduling).
+`scripts/run_pipeline.py` — no strategy argument — is what the Windows
+scheduled task runs; it always fits `zemir.config.PRODUCTION_STRATEGY`. See
+[Scheduling](#scheduling) and
+[docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md](../../docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md).
 
 ## Scheduling
 
@@ -108,8 +110,9 @@ job 3–5 h late, after weekday staking had closed.
 
 ### Carried over from the workflow
 
-- **Always `--model ensemble`:** it's passed explicitly, never left to the
-  script's default (issue #32). A bare invocation once silently ran linear-only.
+- **`run_pipeline.py` takes no strategy argument** (issue #78, superseding
+  issue #32's fix of always passing `--model ensemble` explicitly): it always
+  fits `PRODUCTION_STRATEGY`, so there is no flag left to omit or get wrong.
 - **Dataset caching:** `datasets/` (~8.4 GB of v5.3) is gitignored and reused
   between runs. Only `live.parquet` is re-downloaded each round. The workflow
   needed `clean: false` for this, because `actions/checkout`'s default
@@ -171,8 +174,8 @@ It is split at the only expensive seam, so a comparison never pays to refit:
 
 | Command | Cost | Writes |
 | --- | --- | --- |
-| `python scripts/fit_harness.py --model ensemble` | ~1 h | `runs/harness/<run_id>/validation_predictions.parquet` + `fit_config.json` |
-| `python scripts/fit_harness.py --model ensemble --smoke` | seconds | the same, at meaningless scale |
+| `python scripts/fit_harness.py --strategy zemir_01` | ~1 h | `runs/harness/<run_id>/validation_predictions.parquet` + `fit_config.json` |
+| `python scripts/fit_harness.py --strategy zemir_01 --smoke` | seconds | the same, at meaningless scale |
 | `python scripts/score_harness.py [run_id]` | minutes | `scores.csv`, `era_corr.csv`, `era_mmc.csv`, `era_max_feature_corr.csv`, `scoring_config.json` |
 
 Fitting caches every model's raw validation predictions once. Scoring sweeps
@@ -205,19 +208,25 @@ what neutralization proportion. `proportion = 0.0` *is* "no neutralization".
 
 ## Configuration
 
-`zemir/config.py` holds one flat, frozen `PipelineConfig` and named profiles of
-it. `LIVE` is what the scheduled task runs; `SMOKE` is the same code path at
-a scale that finishes in seconds. A sweep builds its own variants:
+`zemir/config.py` holds one flat, frozen `PipelineConfig` — *which data, which
+window* — and named profiles of it. `LIVE` is what the scheduled task runs;
+`SMOKE` is the same code path at a scale that finishes in seconds. A sweep
+builds its own variants:
 
 ```python
 from dataclasses import replace
 from zemir.config import LIVE
-candidate = replace(LIVE, neutralization_proportion=0.25)
+candidate = replace(LIVE, max_eras=200)
 ```
 
+*Which models, blended how* lives separately, on a `Strategy` (see
+`zemir/strategy.py`): `STRATEGIES` names the ones production and the harness
+fit today, and `PRODUCTION_STRATEGY` is the one `run_pipeline.py` submits.
+
 Every run writes a `config.json` next to its scores recording the config, the
-models fitted, and the neutralizer count — so a comparison between two runs is
-attributable rather than folklore.
+models fitted, the blend weights and neutralization proportion, and the
+neutralizer count — so a comparison between two runs is attributable rather
+than folklore.
 
 ## Scale: smoke vs full
 
@@ -231,9 +240,9 @@ Approximate wall-clock, 8-core machine:
 
 | Run | Time |
 | --- | --- |
-| `--model linear` (full) | 15 s |
-| `--model ensemble --smoke` | 12 s |
-| `--model ensemble` (full) | ~1 h |
+| `--strategy linear` (full) | 15 s |
+| `--strategy zemir_01 --smoke` | 12 s |
+| `--strategy zemir_01` (full) | ~1 h |
 
 ## Running locally
 
@@ -241,7 +250,7 @@ Approximate wall-clock, 8-core machine:
 python -m venv ~/ml-venv                     # once
 ~/ml-venv/bin/pip install -e prod/zemir_01   # once
 cd prod/zemir_01
-~/ml-venv/bin/python scripts/run_experiment.py --model ensemble --smoke
+~/ml-venv/bin/python scripts/run_experiment.py --strategy zemir_01 --smoke
 ```
 
 ## Data

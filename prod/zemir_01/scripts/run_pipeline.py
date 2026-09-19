@@ -9,15 +9,18 @@ Started by prod/zemir_01/scheduling/Invoke-ZemirLiveRun.ps1 (issue #69), which
 maps the exit codes below to failure issues. An invocation with nothing to do
 exits 0.
 
+Takes no strategy argument: `PRODUCTION_STRATEGY` is the single line that
+decides what production ships. A flag here would be a second place that
+decision could be made, and the two could silently disagree — see
+docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md.
+
 Usage:
-  python scripts/run_pipeline.py --model ensemble
+  python scripts/run_pipeline.py
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
-from dataclasses import replace
 from datetime import datetime, timezone
 
 from numerapi import NumerAPI
@@ -26,12 +29,10 @@ from zemir.config import (
     LIVE,
     MIN_AVAILABLE_MEMORY_GIB,
     MIN_VALIDATION_MEAN_CORR,
-    MODEL_NAMES,
-    MODEL_WEIGHTS,
-    NEUTRALIZERS,
+    PRODUCTION_STRATEGY,
     SUBMISSION_MODEL_SLOT,
-    build_trainers,
 )
+from zemir.data import download
 from zemir.pipeline import append_score_log, run_pipeline, submit_predictions
 from zemir.schedule import (
     GATE_FAILED,
@@ -43,6 +44,7 @@ from zemir.schedule import (
     require_available_memory,
     round_to_run,
 )
+from zemir.strategy import build_trainers
 
 # Read by Invoke-ZemirLiveRun.ps1. Anything else non-zero is a crash.
 EXIT_GATE_FAILED = 2
@@ -52,13 +54,7 @@ EXIT_ROUND_CHANGED = 5
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=MODEL_NAMES, default="linear")
-    args = parser.parse_args()
-
-    config = replace(
-        LIVE, model_weights=MODEL_WEIGHTS[args.model], neutralizers=NEUTRALIZERS[args.model]
-    )
+    config = LIVE
     napi = NumerAPI()
 
     # Issue #33/#69: decide from Numerai's round state before downloading live
@@ -81,10 +77,15 @@ def main() -> int:
         return EXIT_INSUFFICIENT_MEMORY
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dataset = download(
+        config.data_version, config.feature_set, target_column=config.target_column
+    )
     result = run_pipeline(
         config,
         run_id=run_id,
-        trainers=build_trainers(args.model, config),
+        trainers=build_trainers(PRODUCTION_STRATEGY),
+        dataset=dataset,
+        blend=PRODUCTION_STRATEGY.blend,
     )
 
     print(f"run_id: {result.run_id}")

@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from zemir.config import LIVE
+from zemir.config import LIVE, STRATEGIES
 from zemir.data import feature_columns as _feature_columns
 from zemir.data import load_meta_model, load_split
 from zemir.models import train_xgboost
@@ -50,7 +50,7 @@ def main() -> None:
     config = LIVE
     if args.max_eras is not None:
         config = replace(config, max_eras=args.max_eras)
-    xgb_kwargs = dict(config.xgboost)
+    xgb_kwargs = dict(STRATEGIES["era_boost"].models[0].params)
     if args.num_iters is not None:
         xgb_kwargs["num_iters"] = args.num_iters
     num_iters = xgb_kwargs["num_iters"]

@@ -17,7 +17,7 @@ Usage:
   python scripts/fit_harness.py --feature-set all --linear sgd \
       --sgd-alpha 0.3 --sgd-eta0 0.0003 \
       --drop-columns-file ~/all_width_drop_columns.json
-  python scripts/fit_harness.py --feature-set all --model era_boost \
+  python scripts/fit_harness.py --feature-set all --strategy era_boost \
       --max-eras 120 --colsample-bytree 0.00123 --trees-per-step 200 \
       --learning-rate 0.005 --drop-columns-file ~/all_width_drop_columns.json
 
@@ -51,37 +51,45 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
-from zemir.config import LIVE, MODEL_NAMES, PipelineConfig, SMOKE, build_trainers
+from zemir.config import LIVE, SMOKE, STRATEGIES, smoke as smoke_strategy
+from zemir.data import feature_columns as _feature_columns
+from zemir.data import load_split
 from zemir.harness import fit_validation_predictions
-from zemir.models import train_ridge, train_sgd
+from zemir.strategy import Strategy
 
 
-def _build_trainers_with_ridge(model: str, config: PipelineConfig, *, alpha: float) -> dict:
-    """`build_trainers`, with the `linear` trainer (if present) swapped for Ridge."""
-    trainers = build_trainers(model, config)
-    if "linear" in trainers:
-        trainers["linear"] = lambda X, y, era: train_ridge(X, y, alpha=alpha)
-    return trainers
+def _with_xgboost_overrides(strategy: Strategy, overrides: Mapping[str, object]) -> Strategy:
+    """`strategy`, with `overrides` merged onto every model whose trainer is `xgboost`."""
+    models = tuple(
+        replace(m, params={**m.params, **overrides}) if m.trainer == "xgboost" else m
+        for m in strategy.models
+    )
+    return replace(strategy, models=models)
 
 
-def _build_trainers_with_sgd(
-    model: str, config: PipelineConfig, *, alpha: float, eta0: float
-) -> dict:
-    """`build_trainers`, with the `linear` trainer (if present) swapped for chunked SGD (issue #50)."""
-    trainers = build_trainers(model, config)
-    if "linear" in trainers:
-        trainers["linear"] = lambda X, y, era: train_sgd(X, y, era, alpha=alpha, eta0=eta0)
-    return trainers
+def _with_linear_trainer(strategy: Strategy, trainer: str, params: Mapping[str, object]) -> Strategy:
+    """`strategy`, with the `linear` spec's trainer swapped for `trainer` (issue #38/#50).
+
+    A `ModelSpec` names its own trainer, so `--linear ols|ridge|sgd` is one
+    string substitution on the spec rather than a `build_trainers` wrapper
+    closing over a lambda.
+    """
+    models = tuple(
+        replace(m, trainer=trainer, params=params) if m.name == "linear" else m
+        for m in strategy.models
+    )
+    return replace(strategy, models=models)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=MODEL_NAMES, default="ensemble")
+    parser.add_argument("--strategy", choices=list(STRATEGIES), default="zemir_01")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--feature-set", choices=["small", "medium", "all"], default=None)
     parser.add_argument("--colsample-bytree", type=float, default=None)
@@ -112,6 +120,10 @@ def main() -> None:
     if args.max_eras is not None:
         config = replace(config, max_eras=args.max_eras)
 
+    strategy = STRATEGIES[args.strategy]
+    if args.smoke:
+        strategy = smoke_strategy(strategy)
+
     xgb_overrides = {}
     if args.colsample_bytree is not None:
         xgb_overrides["colsample_bytree"] = args.colsample_bytree
@@ -124,7 +136,20 @@ def main() -> None:
     if args.learning_rate is not None:
         xgb_overrides["learning_rate"] = args.learning_rate
     if xgb_overrides:
-        config = replace(config, xgboost={**config.xgboost, **xgb_overrides})
+        strategy = _with_xgboost_overrides(strategy, xgb_overrides)
+
+    if args.linear == "ridge":
+        strategy = _with_linear_trainer(strategy, "ridge", {"alpha": args.ridge_alpha})
+    elif args.linear == "sgd":
+        # defaults mirror train_sgd's own signature defaults (sklearn's untuned values)
+        strategy = _with_linear_trainer(
+            strategy,
+            "sgd",
+            {
+                "alpha": args.sgd_alpha if args.sgd_alpha is not None else 0.0001,
+                "eta0": args.sgd_eta0 if args.sgd_eta0 is not None else 0.01,
+            },
+        )
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     suffix = "-smoke" if args.smoke else ""
@@ -150,25 +175,35 @@ def main() -> None:
         suffix += f"-lr{args.learning_rate:g}"
     if drop_features:
         suffix += f"-drop{len(drop_features)}"
-    run_id = f"{stamp}-{args.model}{suffix}"
+    run_id = f"{stamp}-{args.strategy}{suffix}"
 
-    trainers_override = None
-    if args.linear == "ridge":
-        trainers_override = partial(_build_trainers_with_ridge, alpha=args.ridge_alpha)
-    elif args.linear == "sgd":
-        # defaults mirror train_sgd's own signature defaults (sklearn's untuned values)
-        trainers_override = partial(
-            _build_trainers_with_sgd,
-            alpha=args.sgd_alpha if args.sgd_alpha is not None else 0.0001,
-            eta0=args.sgd_eta0 if args.sgd_eta0 is not None else 0.01,
-        )
+    # Narrowed before either split is read off disk (issue #45's dropped
+    # columns), not after — see fit_validation_predictions' docstring.
+    columns = _feature_columns(config.data_version, config.feature_set)
+    if drop_features:
+        columns = [c for c in columns if c not in drop_features]
 
     result = fit_validation_predictions(
         config,
+        strategy,
         run_id=run_id,
-        model=args.model,
-        build_trainers=trainers_override or build_trainers,
-        drop_features=drop_features,
+        feature_columns=columns,
+        load_train=partial(
+            load_split,
+            config.data_version,
+            config.feature_set,
+            "train",
+            feature_names=columns,
+            target_column=config.target_column,
+        ),
+        load_validation=partial(
+            load_split,
+            config.data_version,
+            config.feature_set,
+            "validation",
+            feature_names=columns,
+            target_column=config.target_column,
+        ),
     )
     frame = result.predictions
     print(f"run_id: {run_id}")

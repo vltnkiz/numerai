@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from numerapi import NumerAPI
 
 from zemir.config import PipelineConfig
-from zemir.data import download
+from zemir.data import Dataset
 from zemir.models import Trainer
 from zemir.scoring import (
     ValidationScore,
@@ -22,6 +22,7 @@ from zemir.scoring import (
     score_validation,
     validate_predictions,
 )
+from zemir.strategy import BlendSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
@@ -200,9 +201,22 @@ def run_pipeline(
     *,
     run_id: str,
     trainers: dict[str, Trainer],
+    dataset: Dataset,
+    blend: BlendSpec = BlendSpec(),
     runs_dir: Path = RUNS_DIR,
 ) -> PipelineResult:
     """Train, score, predict, neutralize and write artifacts.
+
+    Takes `dataset` rather than downloading one itself — the caller decides
+    where it comes from (`zemir.data.download` in production, a synthetic
+    fixture in a test), so the whole post-fit path below is exercisable in
+    milliseconds without a network call.
+
+    `trainers` and `blend` are the two halves of a `Strategy` (see
+    `zemir.strategy`) — which models, and how to combine them — passed in
+    separately rather than as one `Strategy` argument, since `trainers` is
+    also where a caller (a test, a sweep script) injects its own fitting
+    logic without a real `Strategy` behind it.
 
     Never submits and never gates: submission is a separate step
     (`submit_predictions`), and the validation-score gate that guards it lives
@@ -211,15 +225,12 @@ def run_pipeline(
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = download(
-        config.data_version, config.feature_set, target_column=config.target_column
-    )
     feature_columns = dataset.feature_columns
-    neutralizers = list(config.neutralizers) if config.neutralizers is not None else feature_columns
+    neutralizers = list(blend.neutralize) if blend.neutralize is not None else feature_columns
 
     train_df, validation_df = scoring_frames(dataset, config)
 
-    _write_run_config(run_dir, config, trainers=trainers, neutralizers=neutralizers)
+    _write_run_config(run_dir, config, trainers=trainers, blend=blend, neutralizers=neutralizers)
 
     X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
     train_df = None
@@ -235,7 +246,7 @@ def run_pipeline(
         _write_score(run_dir, score, prefix=f"{name}_")
 
     combined_validation_predictions = combine_predictions(
-        validation_predictions, validation_df["era"], config.model_weights
+        validation_predictions, validation_df["era"], blend.weights
     )
     combined_validation_score = score_validation(
         validation_df[["era", "target"]].assign(prediction=combined_validation_predictions)
@@ -244,14 +255,14 @@ def run_pipeline(
 
     live_predictions_by_model = predict_each(fitted_models, dataset.live, feature_columns)
     live_predictions = combine_predictions(
-        live_predictions_by_model, dataset.live["era"], config.model_weights
+        live_predictions_by_model, dataset.live["era"], blend.weights
     )
     live_predictions.to_frame().to_csv(run_dir / "live_predictions.csv")
 
     live_for_neutralization = dataset.live[["era"] + neutralizers].copy()
     live_for_neutralization["prediction"] = live_predictions
     live_predictions_neutralized = neutralize_predictions(
-        live_for_neutralization, neutralizers, config.neutralization_proportion
+        live_for_neutralization, neutralizers, blend.proportion
     )
     live_predictions_neutralized = rank_normalize(live_predictions_neutralized)
     live_predictions_neutralized.to_frame().to_csv(run_dir / "live_predictions_neutralized.csv")
@@ -273,6 +284,7 @@ def _write_run_config(
     config: PipelineConfig,
     *,
     trainers: dict[str, Trainer],
+    blend: BlendSpec,
     neutralizers: list[str] | None,
 ) -> None:
     """Record what produced this run's scores, so a comparison is attributable."""
@@ -281,6 +293,8 @@ def _write_run_config(
             {
                 **asdict(config),
                 "models": sorted(trainers),
+                "model_weights": dict(blend.weights) if blend.weights is not None else None,
+                "neutralization_proportion": blend.proportion,
                 "neutralizer_count": len(neutralizers) if neutralizers else 0,
             },
             indent=2,

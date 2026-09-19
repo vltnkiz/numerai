@@ -158,7 +158,7 @@ if ((Invoke-Logged "`"$uv`" pip install --python `"$python`" -e prod\zemir_01") 
 }
 & $uv pip freeze --python $python 2>$null | Out-File (Join-Path $logDir 'pip_freeze.txt') -Encoding utf8
 
-$script = if ($DryRun) { 'scripts\run_experiment.py --model ensemble --smoke' } else { 'scripts\run_pipeline.py --model ensemble' }
+$script = if ($DryRun) { 'scripts\run_experiment.py --strategy zemir_01 --smoke' } else { 'scripts\run_pipeline.py' }
 $exitCode = Invoke-Logged "cd /d `"$zemir`" && `"$python`" -u $script"
 Write-Log "pipeline exit code $exitCode"
 # Round changed mid-fit (e.g. a logon just before noon fitting a stale round):

@@ -29,9 +29,7 @@ import pandas as pd
 import pyarrow as pa
 
 from zemir.config import PipelineConfig, ScoringConfig
-from zemir.config import build_trainers as _default_build_trainers
-from zemir.data import feature_columns as _feature_columns
-from zemir.data import load_meta_model, load_split, load_validation_features
+from zemir.data import load_meta_model, load_validation_features
 from zemir.pipeline import (
     RUNS_DIR,
     _last_eras,
@@ -47,6 +45,8 @@ from zemir.scoring import (
     era_numerai_corr,
     summarize_era_scores,
 )
+from zemir.strategy import Strategy
+from zemir.strategy import build_trainers as _build_trainers
 
 HARNESS_DIR = RUNS_DIR / "harness"
 PREDICTIONS_FILENAME = "validation_predictions.parquet"
@@ -61,60 +61,47 @@ class FitResult:
 
 def fit_validation_predictions(
     config: PipelineConfig,
+    strategy: Strategy,
     *,
     run_id: str,
-    model: str = "ensemble",
+    feature_columns: list[str],
+    load_train: Callable[[], pd.DataFrame],
+    load_validation: Callable[[], pd.DataFrame],
     harness_dir: Path = HARNESS_DIR,
-    build_trainers: Callable[[str, PipelineConfig], dict] = _default_build_trainers,
-    drop_features: frozenset[str] | None = None,
 ) -> FitResult:
-    """Fit production's models and cache their raw validation predictions.
+    """Fit `strategy`'s models and cache their raw validation predictions.
 
     The expensive stage. Writes `validation_predictions.parquet` (index `id`;
     columns `era`, `target`, one per model) plus the `fit_config.json` that
     produced it — a scoring run stamps that config onto its results so a
     comparison is never read against the wrong fit.
 
-    `build_trainers` defaults to production's own (`zemir.config.build_trainers`);
-    overriding it is how issue #38's width comparison tries a regularized
-    linear stage without changing what production ships until that's decided.
+    `strategy` names its own trainers via `ModelSpec.trainer`, resolved
+    through `zemir.strategy.TRAINERS` — trying a regularized linear stage
+    (issue #38) or a chunked one (issue #50) is a caller building its own
+    `Strategy` with `linear`'s spec swapped for a different trainer name,
+    rather than overriding a `build_trainers` callable.
 
-    `drop_features` excludes named columns from *every* trainer and from
-    prediction — issue #45's zero-variance/near-duplicate columns at `all`
-    width, which were only ever adding to the design matrix's memory
-    footprint and its near-singularity, never signal. Applied before each
-    split is even read off disk (via `load_split`'s `feature_names`), not
-    dropped from an already-loaded frame — reading 3,555 columns then
-    dropping 141 briefly holds both the wide and narrow copies; reading
-    3,414 to begin with never materializes the other 141 at all.
-
-    Loads train and validation one at a time via `load_split`, not both (and
-    `live`, which this never uses) up front the way `zemir.data.download`
-    does — issue #47 found that eager triple-load, not the fit itself, is
-    what pushed `all` width's design matrix past the ~52GB WSL memory cap:
-    validation isn't touched until `predict_each` runs *after* fitting, so
-    holding it (and the unused `live` split) resident for the whole ~1h fit
-    was pure waste on top of the fit's own design matrix.
+    Takes `feature_columns` and a `load_train`/`load_validation` pair of
+    zero-argument callables rather than a `Dataset` (contrast
+    `zemir.pipeline.run_pipeline`, which does take one): the caller builds
+    each loader around its own I/O (a real `load_split` call bound to
+    `feature_columns` — already narrowed for issue #45's dropped columns
+    before either loader is ever called — in production; a synthetic fixture
+    in a test), but *when* each is called stays right here, one at a time —
+    train first, then freed, then validation — so a `Dataset` argument that
+    forced both splits resident up front could never silently undo issue
+    #47/#51's memory discipline below.
     """
     run_dir = harness_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    feature_columns = _feature_columns(config.data_version, config.feature_set)
-    if drop_features:
-        feature_columns = [c for c in feature_columns if c not in drop_features]
-
-    train_df = load_split(
-        config.data_version,
-        config.feature_set,
-        "train",
-        feature_names=feature_columns,
-        target_column=config.target_column,
-    ).dropna(subset=["target"])
+    train_df = load_train().dropna(subset=["target"])
     if config.max_eras is not None:
         train_df = _last_eras(train_df, config.max_eras)
     train_eras = len(train_df["era"].unique())
 
-    trainers = build_trainers(model, config)
+    trainers = _build_trainers(strategy)
     X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
     train_df = None
     fitted = fit_models(trainers, X, y, era)
@@ -129,13 +116,7 @@ def fit_validation_predictions(
     X, y, era = None, None, None
     pa.default_memory_pool().release_unused()
 
-    validation_df = load_split(
-        config.data_version,
-        config.feature_set,
-        "validation",
-        feature_names=feature_columns,
-        target_column=config.target_column,
-    ).dropna(subset=["target"])
+    validation_df = load_validation().dropna(subset=["target"])
     if config.max_eras is not None:
         validation_df = _last_eras(validation_df, config.max_eras)
 
@@ -154,8 +135,7 @@ def fit_validation_predictions(
                 "feature_set": config.feature_set,
                 "feature_count": len(feature_columns),
                 "max_eras": config.max_eras,
-                "xgboost": dict(config.xgboost),
-                "models": sorted(trainers),
+                "strategy": asdict(strategy),
                 "train_eras": train_eras,
                 "validation_eras": len(frame["era"].unique()),
                 "validation_rows": len(frame),
