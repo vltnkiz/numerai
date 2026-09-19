@@ -77,10 +77,12 @@ job 3–5 h late, after weekday staking had closed.
 - **Clean `main` only:** the wrapper refuses to run from another branch or with
   uncommitted changes, so work in progress is never submitted. The cost is a
   failed run on a day the checkout isn't clean.
-- **Memory:** `MIN_AVAILABLE_MEMORY_GIB` (46) is checked before the fit starts.
-  The full `medium` ensemble peaked at 43.2 GiB resident on Windows. That's
+- **Memory:** `MIN_AVAILABLE_MEMORY_GIB` (42) is checked before the fit starts.
+  The full `medium` ensemble peaks at 38.93 GiB resident on Windows (43.2 GiB
+  before issue #80 deferred the validation window until after the fit). That's
   about twice issue #44's 21.48 GiB, which covered only the linear stage
-  (`LinearRegression` upcasting the int8 design matrix to float64).
+  (`LinearRegression` upcasting the int8 design matrix to float64). The
+  discipline that holds it there lives in `zemir/fitting.py`.
 - **Priority and sleep:** the pipeline runs at BelowNormal priority, and the
   machine is kept awake while it runs.
 - **Shut down afterwards:** once a run ends (however it ends),
@@ -223,10 +225,17 @@ candidate = replace(LIVE, max_eras=200)
 `zemir/strategy.py`): `STRATEGIES` names the ones production and the harness
 fit today, and `PRODUCTION_STRATEGY` is the one `run_pipeline.py` submits.
 
+Each `ModelSpec` names its own `features`, and that is what the model is
+fitted and predicted on: `zemir/fitting.py` loads the union of every model's
+columns once and hands each model its own slice. `PipelineConfig.feature_set`
+is the run's default universe for scoring and neutralization, not a model's
+width. That module also owns the fit's memory discipline (see its docstring
+before touching anything that allocates), so callers cannot scatter it.
+
 Every run writes a `config.json` next to its scores recording the config, the
-models fitted, the blend weights and neutralization proportion, and the
-neutralizer count — so a comparison between two runs is attributable rather
-than folklore.
+models fitted and the feature set each named, the blend weights and
+neutralization proportion, and the neutralizer count — so a comparison between
+two runs is attributable rather than folklore.
 
 ## Scale: smoke vs full
 

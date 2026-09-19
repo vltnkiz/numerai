@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +40,7 @@ def _read_parquet(
     Releases pyarrow's pool before returning: `pd.read_parquet` decodes
     through an intermediate Arrow table that pandas copies out of, and the
     now-unreferenced table's arena isn't returned to the OS on its own — the
-    same pattern `load_validation_features`/`fit_models`/
+    same pattern `load_validation_features`/`fit_strategy`/
     `fit_validation_predictions` already work around, measured elsewhere at
     `all` width as a ~2x RSS-vs-logical-size gap (issue #52). This is the one
     caller of `pd.read_parquet` in this module that lacked the fix (issue
@@ -72,6 +73,41 @@ def feature_columns(
     napi = napi or NumerAPI()
     features_path = _download_file(napi, version, "features.json", force=False)
     return json.loads(features_path.read_text())["feature_sets"][feature_set]
+
+
+def resolve_feature_sets(
+    version: str,
+    names: Iterable[str],
+    *,
+    drop: frozenset[str] = frozenset(),
+    napi: NumerAPI | None = None,
+) -> dict[str, list[str]]:
+    """Each named feature set's columns, in `features.json`'s own order.
+
+    The one place a `ModelSpec.features` name becomes columns. `drop` removes
+    columns from *every* set (issue #45's dead-column drop), so a caller
+    narrowing `all` width does it once here rather than per model.
+    """
+    return {
+        name: [c for c in feature_columns(version, name, napi=napi) if c not in drop]
+        for name in dict.fromkeys(names)
+    }
+
+
+def last_eras(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    eras = sorted(df["era"].unique(), key=int)[-n:]
+    return df[df["era"].isin(eras)]
+
+
+def scoring_window(df: pd.DataFrame, max_eras: int | None) -> pd.DataFrame:
+    """The target-bearing rows of `df`, restricted to its last `max_eras` eras.
+
+    What every fit and every validation score is computed over — one
+    definition, so a train frame and a validation frame can never be
+    windowed differently.
+    """
+    df = df.dropna(subset=["target"])
+    return df if max_eras is None else last_eras(df, max_eras)
 
 
 def load_split(
@@ -155,14 +191,18 @@ def load_meta_model(version: str, *, napi: NumerAPI | None = None) -> pd.Series:
 
 def download(
     version: str,
-    feature_set: str,
+    feature_names: list[str],
     *,
     target_column: str = "target",
     napi: NumerAPI | None = None,
 ) -> Dataset:
-    napi = napi or NumerAPI()
+    """All three splits at `feature_names` width.
 
-    feature_names = feature_columns(version, feature_set, napi=napi)
+    Takes columns, not a feature-set name: a run's width is the union of what
+    its models train on (plus any blend neutralizers), which no single
+    named set describes — see `zemir.strategy.required_columns`.
+    """
+    napi = napi or NumerAPI()
 
     train_path = _download_file(napi, version, "train.parquet", force=False)
     validation_path = _download_file(napi, version, "validation.parquet", force=False)

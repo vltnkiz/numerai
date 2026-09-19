@@ -19,9 +19,9 @@ import argparse
 from datetime import datetime, timezone
 
 from zemir.config import LIVE, SMOKE, STRATEGIES, smoke as smoke_strategy
-from zemir.data import download
+from zemir.data import download, resolve_feature_sets
 from zemir.pipeline import RUNS_DIR, run_pipeline
-from zemir.strategy import build_trainers
+from zemir.strategy import required_columns
 
 EXPERIMENTS_DIR = RUNS_DIR / "experiments"
 
@@ -43,15 +43,18 @@ def main() -> None:
     suffix = "-smoke" if args.smoke else ""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
+    feature_sets = resolve_feature_sets(config.data_version, strategy.feature_set_names)
     dataset = download(
-        config.data_version, config.feature_set, target_column=config.target_column
+        config.data_version,
+        required_columns(strategy, feature_sets),
+        target_column=config.target_column,
     )
     result = run_pipeline(
         config,
         run_id=f"{stamp}-{args.strategy}{suffix}",
-        trainers=build_trainers(strategy),
+        strategy=strategy,
+        feature_sets=feature_sets,
         dataset=dataset,
-        blend=strategy.blend,
         runs_dir=EXPERIMENTS_DIR,
     )
 

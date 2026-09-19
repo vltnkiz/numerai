@@ -4,7 +4,7 @@ from zemir.config import LIVE
 from zemir.harness import fit_validation_predictions
 from zemir.strategy import BlendSpec, ModelSpec, Strategy
 
-from factories import FEATURE_COLUMNS, make_dataset
+from factories import FEATURE_SETS, make_dataset
 
 # `ols` is a real trainer (unlike a fake `predict_column_trainer`) — sklearn's
 # LinearRegression fits the ~200-row synthetic dataset instantly, so there's
@@ -39,7 +39,7 @@ def test_fit_validation_predictions_writes_the_cache_without_touching_the_networ
         LIVE,
         STRATEGY,
         run_id="test-fit",
-        feature_columns=FEATURE_COLUMNS,
+        feature_sets=FEATURE_SETS,
         load_train=load_train,
         load_validation=load_validation,
         harness_dir=tmp_path,
@@ -62,7 +62,7 @@ def test_fit_validation_predictions_calls_load_train_before_load_validation(tmp_
         LIVE,
         STRATEGY,
         run_id="ordering",
-        feature_columns=FEATURE_COLUMNS,
+        feature_sets=FEATURE_SETS,
         load_train=load_train,
         load_validation=load_validation,
         harness_dir=tmp_path,
@@ -80,10 +80,36 @@ def test_fit_validation_predictions_respects_max_eras(tmp_path):
         config,
         STRATEGY,
         run_id="max-eras",
-        feature_columns=FEATURE_COLUMNS,
+        feature_sets=FEATURE_SETS,
         load_train=load_train,
         load_validation=load_validation,
         harness_dir=tmp_path,
     )
 
     assert result.predictions["era"].nunique() == 3
+
+
+def test_fit_validation_predictions_fits_two_specs_at_different_widths(tmp_path):
+    dataset = make_dataset()
+    load_train, load_validation, _ = _loaders(dataset)
+    strategy = Strategy(
+        models=(
+            ModelSpec(name="linear_narrow", features="narrow", trainer="ols"),
+            ModelSpec(name="linear_wide", features="medium", trainer="ols"),
+        ),
+        blend=BlendSpec(),
+    )
+
+    result = fit_validation_predictions(
+        LIVE,
+        strategy,
+        run_id="two-widths",
+        feature_sets=FEATURE_SETS,
+        load_train=load_train,
+        load_validation=load_validation,
+        harness_dir=tmp_path,
+    )
+
+    assert set(result.predictions.columns) >= {"linear_narrow", "linear_wide"}
+    # The two fits learned different things: one saw a single column, one saw three.
+    assert not result.predictions["linear_narrow"].equals(result.predictions["linear_wide"])

@@ -32,9 +32,9 @@ import pandas as pd
 
 from zemir.config import LIVE, STRATEGIES
 from zemir.data import feature_columns as _feature_columns
-from zemir.data import load_meta_model, load_split
+from zemir.data import load_meta_model, load_split, scoring_window
 from zemir.models import train_xgboost
-from zemir.pipeline import RUNS_DIR, _last_eras
+from zemir.pipeline import RUNS_DIR
 from zemir.scoring import era_mmc, era_numerai_corr
 
 PROBE_DIR = RUNS_DIR / "probe_era_budget"
@@ -63,9 +63,8 @@ def main() -> None:
         "train",
         feature_names=feature_columns,
         target_column=config.target_column,
-    ).dropna(subset=["target"])
-    if config.max_eras is not None:
-        train_df = _last_eras(train_df, config.max_eras)
+    )
+    train_df = scoring_window(train_df, config.max_eras)
     X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
     train_df = None
 
@@ -75,9 +74,8 @@ def main() -> None:
         "validation",
         feature_names=feature_columns,
         target_column=config.target_column,
-    ).dropna(subset=["target"])
-    if config.max_eras is not None:
-        validation_df = _last_eras(validation_df, config.max_eras)
+    )
+    validation_df = scoring_window(validation_df, config.max_eras)
 
     meta_model = load_meta_model(config.data_version)
 

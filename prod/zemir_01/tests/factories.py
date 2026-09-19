@@ -13,8 +13,13 @@ import numpy as np
 import pandas as pd
 
 from zemir.data import Dataset
+from zemir.strategy import ModelSpec
 
 FEATURE_COLUMNS = ["feature_a", "feature_b", "feature_c"]
+# Feature-set name -> columns, as `zemir.data.resolve_feature_sets` would build it.
+# `narrow` is a strict subset of `medium`, so a strategy naming both has a union
+# equal to `medium` — the shape `small` (42) inside `medium` (780) would have.
+FEATURE_SETS = {"medium": FEATURE_COLUMNS, "narrow": ["feature_a"]}
 SIGNAL_COLUMN = "feature_a"
 
 
@@ -63,41 +68,38 @@ def make_dataset(
 class PredictColumn:
     """A fitted model whose prediction is just one input column, unchanged.
 
-    Stands in for a real `Trainer`'s fitted model — deterministic, and fast
+    Stands in for a real trainer's fitted model — deterministic, and fast
     enough that a test never needs sklearn/xgboost to exercise the pipeline's
-    own logic (combine, neutralize, score) rather than a model's.
+    own logic (combine, neutralize, score) rather than a model's. Records the
+    columns of the last frame it was asked to predict on, so a test can see
+    exactly what a model was handed.
     """
 
-    def __init__(self, column: str) -> None:
+    def __init__(self, column: str, sign: float = 1.0) -> None:
         self.column = column
+        self.sign = sign
+        self.predicted_on: list[str] | None = None
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return X[self.column].to_numpy(dtype=float)
+        self.predicted_on = list(X.columns)
+        return self.sign * X[self.column].to_numpy(dtype=float)
 
 
-def predict_column_trainer(column: str):
-    """A `Trainer` (see `zemir.models.Trainer`) that fits nothing and predicts `column`."""
-
-    def trainer(X: pd.DataFrame, y: pd.Series, era: pd.Series) -> PredictColumn:
-        return PredictColumn(column)
-
-    return trainer
+def fit_predict_column(X, y, era, *, column: str, **_: object) -> PredictColumn:
+    """A trainer (registered as `predict_column`) that fits nothing and predicts `column`."""
+    return PredictColumn(column)
 
 
-class PredictNegatedColumn:
-    """Like `PredictColumn`, but predicts the negation — perfectly anti-correlated with it."""
-
-    def __init__(self, column: str) -> None:
-        self.column = column
-
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return -X[self.column].to_numpy(dtype=float)
+def fit_predict_negated_column(X, y, era, *, column: str, **_: object) -> PredictColumn:
+    """A trainer (registered as `predict_negated_column`) that predicts `-column`."""
+    return PredictColumn(column, sign=-1.0)
 
 
-def predict_negated_column_trainer(column: str):
-    """A `Trainer` that fits nothing and predicts `-column`."""
-
-    def trainer(X: pd.DataFrame, y: pd.Series, era: pd.Series) -> PredictNegatedColumn:
-        return PredictNegatedColumn(column)
-
-    return trainer
+def predict_column_spec(name: str, features: str, column: str, *, negated: bool = False) -> ModelSpec:
+    """A `ModelSpec` for a fake trainer — needs the `fake_trainers` fixture."""
+    return ModelSpec(
+        name=name,
+        features=features,
+        trainer="predict_negated_column" if negated else "predict_column",
+        params={"column": column},
+    )

@@ -20,6 +20,10 @@ _Avoid_: trading measured payout away for lower exposure, or treating a high-exp
 A named list of `ModelSpec` plus one `BlendSpec` — which models, blended how. Named `zemir_NN` when it is a shipped or ship-candidate blend; named after its single model otherwise (`linear`, `era_boost`). A generation label, **not** a submission slot: a strategy can be fitted and measured before, or without, ever shipping (see [issue #74](https://github.com/vltnkiz/numerai/issues/74)).
 _Avoid_: assuming a strategy's name implies it is what production currently submits — check `PRODUCTION_STRATEGY` for that.
 
+**Feature set**:
+A named list of feature columns from a dataset version's `features.json` (`small`, `medium`, `all`). `ModelSpec.features` names the one a model is fitted and predicted on; `PipelineConfig.feature_set` names the run's default universe for scoring and neutralization. They are deliberately separate, so a strategy can hold models at different widths (see [issue #80](https://github.com/vltnkiz/numerai/issues/80)). A run loads the **union** of every model's columns (plus any blend neutralizers) once, and each model is handed only its own slice.
+_Avoid_: reading `PipelineConfig.feature_set` as the width a model trained on — check the model's own `features`. Feature sets are not nested: `small` is not a subset of `medium` (only 11 of its 42 columns appear there), so a strategy naming both loads more than `medium`.
+
 **Submission slot**:
 A Numerai model id that `submit_predictions` uploads to, resolved through `NUMERAI_MODELS`. `SUBMISSION_MODEL_SLOT` names a slot; a **strategy** names what gets fitted. They are deliberately separate — `SUBMISSION_MODEL_SLOT = "zemir_01"` names a slot, `STRATEGIES["zemir_01"]` names a strategy — so a strategy can exist, and be measured, without occupying or implying a slot.
 _Avoid_: conflating a strategy name with a submission slot name just because they currently share a spelling (`"zemir_01"`); one is a fit, the other is where predictions get uploaded.

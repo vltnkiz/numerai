@@ -8,13 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
 from dotenv import load_dotenv
 from numerapi import NumerAPI
 
 from zemir.config import PipelineConfig
-from zemir.data import Dataset
-from zemir.models import Trainer
+from zemir.data import Dataset, scoring_window
+from zemir.fitting import FittedSpec, fit_strategy
 from zemir.scoring import (
     ValidationScore,
     neutralize_predictions,
@@ -22,7 +21,7 @@ from zemir.scoring import (
     score_validation,
     validate_predictions,
 )
-from zemir.strategy import BlendSpec
+from zemir.strategy import FeatureSets, Strategy
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
@@ -143,55 +142,12 @@ def submit_predictions(
     return submission
 
 
-def scoring_frames(dataset, config: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The target-bearing train/validation frames the pipeline actually fits and scores on."""
-    train_df = dataset.train.dropna(subset=["target"])
-    validation_df = dataset.validation.dropna(subset=["target"])
-    if config.max_eras is not None:
-        train_df = _last_eras(train_df, config.max_eras)
-        validation_df = _last_eras(validation_df, config.max_eras)
-    return train_df, validation_df
-
-
-def fit_models(
-    trainers: dict[str, Trainer], X: pd.DataFrame, y: pd.Series, era: pd.Series
-) -> dict[str, object]:
-    """Fit every trainer against the same, already-sliced `(X, y, era)`.
-
-    Takes the slice itself rather than `train_df` + `feature_columns`: slicing
-    once per trainer here re-copied the full feature matrix out of `train_df`
-    for each model in the ensemble, while `train_df` (which already contains
-    that data) stayed resident the whole time — a second full-width copy held
-    alongside the first for the entire fit. Callers slice once and drop their
-    `train_df` reference *before* calling this, so only one copy is ever live
-    (issue #47, the ~8.7GiB gap issue #45's investigation stalled on).
-
-    Releasing pyarrow's pool before *each* trainer, not once after all of them:
-    the caller has already dropped `train_df` by the time this runs, but
-    pyarrow's default pool (mimalloc) keeps those freed pages for reuse rather
-    than returning them to the OS, so they stay resident through every trainer
-    in turn. Measured at `all` width: 20.11GiB resident immediately after the
-    load and the drop, 9.77GiB after this call — **10.3GiB** that both the
-    linear and the era_boost stage were otherwise fitting on top of, and the
-    difference between issue #52's `all`-width ensemble fit breaching its
-    memory guard and clearing it. `zemir.harness` makes the same call after
-    this returns; that one frees the *fit's* residue before the validation
-    load, and is not this one.
-    """
-    fitted = {}
-    for name, trainer in trainers.items():
-        pa.default_memory_pool().release_unused()
-        fitted[name] = trainer(X, y, era)
-    return fitted
-
-
 def predict_each(
-    fitted_models: dict[str, object], df: pd.DataFrame, feature_columns: list[str]
+    fitted_models: Mapping[str, FittedSpec], df: pd.DataFrame
 ) -> dict[str, pd.Series]:
+    """Each model's predictions on `df`, each drawn from its own columns."""
     return {
-        name: pd.Series(
-            model.predict(df[feature_columns]), index=df.index, name="prediction"
-        )
+        name: pd.Series(model.predict(df), index=df.index, name="prediction")
         for name, model in fitted_models.items()
     }
 
@@ -200,9 +156,9 @@ def run_pipeline(
     config: PipelineConfig,
     *,
     run_id: str,
-    trainers: dict[str, Trainer],
+    strategy: Strategy,
+    feature_sets: FeatureSets,
     dataset: Dataset,
-    blend: BlendSpec = BlendSpec(),
     runs_dir: Path = RUNS_DIR,
 ) -> PipelineResult:
     """Train, score, predict, neutralize and write artifacts.
@@ -212,11 +168,11 @@ def run_pipeline(
     fixture in a test), so the whole post-fit path below is exercisable in
     milliseconds without a network call.
 
-    `trainers` and `blend` are the two halves of a `Strategy` (see
-    `zemir.strategy`) — which models, and how to combine them — passed in
-    separately rather than as one `Strategy` argument, since `trainers` is
-    also where a caller (a test, a sweep script) injects its own fitting
-    logic without a real `Strategy` behind it.
+    `dataset` must be loaded at (at least) the width the strategy needs —
+    `zemir.strategy.required_columns` — since each model is fitted on its own
+    slice of it (`zemir.fitting`, which owns the memory discipline of the fit;
+    `dataset.train` stays the caller's, resident for the whole run, exactly as
+    before). `feature_sets` resolves each `ModelSpec.features` name to columns.
 
     Never submits and never gates: submission is a separate step
     (`submit_predictions`), and the validation-score gate that guards it lives
@@ -225,17 +181,23 @@ def run_pipeline(
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    feature_columns = dataset.feature_columns
-    neutralizers = list(blend.neutralize) if blend.neutralize is not None else feature_columns
+    blend = strategy.blend
+    # `None` neutralizers means everything the run loaded.
+    neutralizers = (
+        list(blend.neutralize) if blend.neutralize is not None else dataset.feature_columns
+    )
 
-    train_df, validation_df = scoring_frames(dataset, config)
+    _write_run_config(run_dir, config, strategy=strategy, neutralizers=neutralizers)
 
-    _write_run_config(run_dir, config, trainers=trainers, blend=blend, neutralizers=neutralizers)
-
-    X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
-    train_df = None
-    fitted_models = fit_models(trainers, X, y, era)
-    validation_predictions = predict_each(fitted_models, validation_df, feature_columns)
+    fit = fit_strategy(
+        strategy,
+        lambda: dataset.train,
+        feature_sets=feature_sets,
+        max_eras=config.max_eras,
+    )
+    fitted_models = fit.models
+    validation_df = scoring_window(dataset.validation, config.max_eras)
+    validation_predictions = predict_each(fitted_models, validation_df)
     validation_scores = {
         name: score_validation(
             validation_df[["era", "target"]].assign(prediction=preds),
@@ -253,7 +215,7 @@ def run_pipeline(
     )
     _write_score(run_dir, combined_validation_score, prefix="")
 
-    live_predictions_by_model = predict_each(fitted_models, dataset.live, feature_columns)
+    live_predictions_by_model = predict_each(fitted_models, dataset.live)
     live_predictions = combine_predictions(
         live_predictions_by_model, dataset.live["era"], blend.weights
     )
@@ -283,16 +245,17 @@ def _write_run_config(
     run_dir: Path,
     config: PipelineConfig,
     *,
-    trainers: dict[str, Trainer],
-    blend: BlendSpec,
+    strategy: Strategy,
     neutralizers: list[str] | None,
 ) -> None:
     """Record what produced this run's scores, so a comparison is attributable."""
+    blend = strategy.blend
     (run_dir / "config.json").write_text(
         json.dumps(
             {
                 **asdict(config),
-                "models": sorted(trainers),
+                "models": sorted(spec.name for spec in strategy.models),
+                "model_features": {spec.name: spec.features for spec in strategy.models},
                 "model_weights": dict(blend.weights) if blend.weights is not None else None,
                 "neutralization_proportion": blend.proportion,
                 "neutralizer_count": len(neutralizers) if neutralizers else 0,
@@ -301,11 +264,6 @@ def _write_run_config(
             sort_keys=True,
         )
     )
-
-
-def _last_eras(df: pd.DataFrame, n: int) -> pd.DataFrame:
-    eras = sorted(df["era"].unique(), key=int)[-n:]
-    return df[df["era"].isin(eras)]
 
 
 def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:

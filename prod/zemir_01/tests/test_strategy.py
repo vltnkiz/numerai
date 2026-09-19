@@ -1,7 +1,14 @@
-from zemir.pipeline import fit_models, predict_each
-from zemir.strategy import BlendSpec, ModelSpec, Strategy, build_trainers
+from zemir.fitting import fit_strategy
+from zemir.pipeline import predict_each
+from zemir.strategy import (
+    BlendSpec,
+    ModelSpec,
+    Strategy,
+    required_columns,
+    union_columns,
+)
 
-from factories import make_dataset
+from factories import FEATURE_SETS, make_dataset
 
 
 def test_two_era_boosts_at_different_depths_fit_and_predict_as_distinct_models():
@@ -41,25 +48,44 @@ def test_two_era_boosts_at_different_depths_fit_and_predict_as_distinct_models()
         blend=BlendSpec(),
     )
 
-    train_df = dataset.train.dropna(subset=["target"])
-    X, y, era = train_df[dataset.feature_columns], train_df["target"], train_df["era"]
-
-    fitted = fit_models(build_trainers(strategy), X, y, era)
-    predictions = predict_each(fitted, dataset.validation, dataset.feature_columns)
+    fit = fit_strategy(strategy, lambda: dataset.train, feature_sets=FEATURE_SETS)
+    predictions = predict_each(fit.models, dataset.validation)
 
     assert set(predictions) == {"era_boost_shallow", "era_boost_deep"}
     assert not predictions["era_boost_shallow"].equals(predictions["era_boost_deep"])
 
 
-def test_build_trainers_keys_by_model_spec_name_not_trainer_name():
-    strategy = Strategy(
-        models=(
-            ModelSpec(name="a", features="medium", trainer="ols"),
-            ModelSpec(name="b", features="medium", trainer="ols"),
+def _strategy(*feature_sets: str, neutralize: tuple[str, ...] | None = None) -> Strategy:
+    return Strategy(
+        models=tuple(
+            ModelSpec(name=f"m{i}", features=name, trainer="ols")
+            for i, name in enumerate(feature_sets)
         ),
-        blend=BlendSpec(),
+        blend=BlendSpec(neutralize=neutralize),
     )
 
-    trainers = build_trainers(strategy)
 
-    assert set(trainers) == {"a", "b"}
+def test_union_columns_is_each_column_once_in_first_seen_order():
+    sets = {"one": ["b", "a"], "two": ["a", "c"]}
+
+    assert union_columns(_strategy("one", "two"), sets) == ("b", "a", "c")
+
+
+def test_union_of_models_naming_one_set_is_that_sets_own_order():
+    # Tree stages sample columns by position: the shipped strategies (every model
+    # on `medium`) must see `medium`'s columns exactly as `features.json` lists them.
+    sets = {"medium": ["z", "y", "x"]}
+
+    assert union_columns(_strategy("medium", "medium"), sets) == ("z", "y", "x")
+
+
+def test_required_columns_adds_blend_neutralizers_outside_the_union():
+    sets = {"one": ["a", "b"]}
+
+    strategy = _strategy("one", neutralize=("b", "n1", "n2"))
+
+    assert required_columns(strategy, sets) == ["a", "b", "n1", "n2"]
+
+
+def test_feature_set_names_are_distinct_in_first_seen_order():
+    assert _strategy("b", "a", "b").feature_set_names == ("b", "a")

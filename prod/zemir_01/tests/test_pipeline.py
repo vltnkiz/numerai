@@ -1,10 +1,17 @@
+import json
+
 import pandas as pd
 import pytest
 
 from zemir.config import LIVE, MIN_VALIDATION_MEAN_CORR
 from zemir.pipeline import combine_predictions, run_pipeline
+from zemir.strategy import BlendSpec, Strategy
 
-from factories import SIGNAL_COLUMN, make_dataset, predict_column_trainer, predict_negated_column_trainer
+from factories import FEATURE_SETS, SIGNAL_COLUMN, make_dataset, predict_column_spec
+
+
+def _strategy(*specs, blend=BlendSpec()):
+    return Strategy(models=specs, blend=blend)
 
 
 def test_combine_predictions_returns_a_lone_model_untouched():
@@ -42,14 +49,15 @@ def test_combine_predictions_ranks_within_each_era_independently():
     assert combined.tolist() == pytest.approx([0.75, 0.75, 0.75, 0.75])
 
 
-def test_run_pipeline_exercises_the_post_fit_path_from_a_synthetic_dataset(tmp_path):
+def test_run_pipeline_exercises_the_post_fit_path_from_a_synthetic_dataset(tmp_path, fake_trainers):
     """Accepting a `Dataset` argument is what makes this run in milliseconds (issue #75)."""
     dataset = make_dataset()
 
     result = run_pipeline(
         LIVE,
         run_id="test-run",
-        trainers={"linear": predict_column_trainer(SIGNAL_COLUMN)},
+        strategy=_strategy(predict_column_spec("linear", "medium", SIGNAL_COLUMN)),
+        feature_sets=FEATURE_SETS,
         dataset=dataset,
         runs_dir=tmp_path,
     )
@@ -64,13 +72,14 @@ def test_run_pipeline_exercises_the_post_fit_path_from_a_synthetic_dataset(tmp_p
     assert result.live_predictions_neutralized.max() < 1.0
 
 
-def test_run_pipeline_gate_passes_when_predictions_track_the_target(tmp_path):
+def test_run_pipeline_gate_passes_when_predictions_track_the_target(tmp_path, fake_trainers):
     dataset = make_dataset()
 
     result = run_pipeline(
         LIVE,
         run_id="above-gate",
-        trainers={"linear": predict_column_trainer(SIGNAL_COLUMN)},
+        strategy=_strategy(predict_column_spec("linear", "medium", SIGNAL_COLUMN)),
+        feature_sets=FEATURE_SETS,
         dataset=dataset,
         runs_dir=tmp_path,
     )
@@ -79,15 +88,42 @@ def test_run_pipeline_gate_passes_when_predictions_track_the_target(tmp_path):
     assert result.combined_validation_score.mean_corr >= MIN_VALIDATION_MEAN_CORR
 
 
-def test_run_pipeline_gate_fails_when_predictions_are_anti_correlated_with_the_target(tmp_path):
+def test_run_pipeline_gate_fails_when_predictions_are_anti_correlated_with_the_target(
+    tmp_path, fake_trainers
+):
     dataset = make_dataset()
 
     result = run_pipeline(
         LIVE,
         run_id="below-gate",
-        trainers={"linear": predict_negated_column_trainer(SIGNAL_COLUMN)},
+        strategy=_strategy(
+            predict_column_spec("linear", "medium", SIGNAL_COLUMN, negated=True)
+        ),
+        feature_sets=FEATURE_SETS,
         dataset=dataset,
         runs_dir=tmp_path,
     )
 
     assert result.combined_validation_score.mean_corr < MIN_VALIDATION_MEAN_CORR
+
+
+def test_run_pipeline_fits_two_specs_at_different_widths_in_one_run(tmp_path, fake_trainers):
+    """#80's done-when, end to end: the wide model reads a column the narrow one never sees."""
+    dataset = make_dataset()
+    strategy = _strategy(
+        predict_column_spec("narrow_model", "narrow", "feature_a"),
+        predict_column_spec("wide_model", "medium", "feature_c"),
+    )
+
+    result = run_pipeline(
+        LIVE,
+        run_id="two-widths",
+        strategy=strategy,
+        feature_sets=FEATURE_SETS,
+        dataset=dataset,
+        runs_dir=tmp_path,
+    )
+
+    assert set(result.validation_scores) == {"narrow_model", "wide_model"}
+    config = json.loads((result.run_dir / "config.json").read_text())
+    assert config["model_features"] == {"narrow_model": "narrow", "wide_model": "medium"}

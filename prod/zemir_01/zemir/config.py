@@ -75,12 +75,19 @@ ROUND_OPEN_MAX_WAIT_SECONDS = 90 * 60
 
 # Issue #69: the live fit on Windows peaked at 43.2 GiB resident (full-scale
 # `medium` ensemble, sampled every 5 s) — about twice issue #44's 21.48 GiB,
-# which measured the linear stage alone. The machine now doubles as a desktop,
+# which measured the linear stage alone. Issue #80 re-measured it: 43.20 GiB on
+# the pre-#80 code again (same instrument, same machine), 38.93 GiB once
+# `zemir.fitting` owns the fit — the 4.3 GiB gap is the validation window
+# copy (3.81 GiB logical) that `run_pipeline` used to build up front and hold
+# through the linear stage's float64 upcast, and now builds after the fit.
+# The peak is the OLS fit, flat for ~60 s at 38.93 GiB. A mixed-width strategy
+# (era_boost on `small`, OLS on `medium`) peaked at 39.29 GiB: +0.36 GiB, the
+# extra columns the dataset loads. The machine now doubles as a desktop,
 # so scripts/run_pipeline.py refuses to *start* a fit with less than this
-# available, leaving ~3 GiB headroom: a clean, retried skip beats paging for an
-# hour or a MemoryError fifteen minutes in. Re-measure when the feature set,
-# models or training eras change.
-MIN_AVAILABLE_MEMORY_GIB = 46
+# available, leaving ~3 GiB headroom over the measured peak: a clean, retried
+# skip beats paging for an hour or a MemoryError fifteen minutes in. Re-measure
+# when the feature set, models or training eras change.
+MIN_AVAILABLE_MEMORY_GIB = 42
 
 
 @dataclass(frozen=True)

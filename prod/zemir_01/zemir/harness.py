@@ -26,17 +26,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
 
 from zemir.config import PipelineConfig, ScoringConfig
-from zemir.data import load_meta_model, load_validation_features
-from zemir.pipeline import (
-    RUNS_DIR,
-    _last_eras,
-    combine_predictions,
-    fit_models,
-    predict_each,
-)
+from zemir.data import load_meta_model, load_validation_features, scoring_window
+from zemir.fitting import fit_strategy
+from zemir.pipeline import RUNS_DIR, combine_predictions, predict_each
 from zemir.scoring import (
     era_feature_corr,
     era_feature_projection,
@@ -45,8 +39,7 @@ from zemir.scoring import (
     era_numerai_corr,
     summarize_era_scores,
 )
-from zemir.strategy import Strategy
-from zemir.strategy import build_trainers as _build_trainers
+from zemir.strategy import FeatureSets, Strategy, union_columns
 
 HARNESS_DIR = RUNS_DIR / "harness"
 PREDICTIONS_FILENAME = "validation_predictions.parquet"
@@ -64,7 +57,7 @@ def fit_validation_predictions(
     strategy: Strategy,
     *,
     run_id: str,
-    feature_columns: list[str],
+    feature_sets: FeatureSets,
     load_train: Callable[[], pd.DataFrame],
     load_validation: Callable[[], pd.DataFrame],
     harness_dir: Path = HARNESS_DIR,
@@ -82,45 +75,26 @@ def fit_validation_predictions(
     `Strategy` with `linear`'s spec swapped for a different trainer name,
     rather than overriding a `build_trainers` callable.
 
-    Takes `feature_columns` and a `load_train`/`load_validation` pair of
+    Takes `feature_sets` and a `load_train`/`load_validation` pair of
     zero-argument callables rather than a `Dataset` (contrast
     `zemir.pipeline.run_pipeline`, which does take one): the caller builds
     each loader around its own I/O (a real `load_split` call bound to
-    `feature_columns` — already narrowed for issue #45's dropped columns
-    before either loader is ever called — in production; a synthetic fixture
-    in a test), but *when* each is called stays right here, one at a time —
-    train first, then freed, then validation — so a `Dataset` argument that
-    forced both splits resident up front could never silently undo issue
-    #47/#51's memory discipline below.
+    `union_columns(strategy, feature_sets)` — already narrowed for issue #45's
+    dropped columns before either loader is ever called — in production; a
+    synthetic fixture in a test), but *when* each is called stays right here,
+    one at a time — train first, fitted and freed inside `fit_strategy`
+    (`zemir.fitting`, which owns that discipline), then validation — so a
+    `Dataset` argument that forced both splits resident up front could never
+    silently undo issue #47/#51's memory discipline.
     """
     run_dir = harness_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    train_df = load_train().dropna(subset=["target"])
-    if config.max_eras is not None:
-        train_df = _last_eras(train_df, config.max_eras)
-    train_eras = len(train_df["era"].unique())
+    fit = fit_strategy(strategy, load_train, feature_sets=feature_sets, max_eras=config.max_eras)
 
-    trainers = _build_trainers(strategy)
-    X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
-    train_df = None
-    fitted = fit_models(trainers, X, y, era)
-    # trainers' own `del X, y` (e.g. train_sgd, train_ridge) only clears their
-    # local names — this frame's X is a separate binding to the same design
-    # matrix and stays resident until cleared here too. `release_unused()` is
-    # needed on top of that: pyarrow's default pool (mimalloc) holds freed
-    # pages for reuse rather than returning them to the OS, so RSS otherwise
-    # stays high straight through the validation load below (issue #51 found
-    # this the hard way — ~11GB of resident memory that only `del`-ing X, y,
-    # era never released, freed instead by this call).
-    X, y, era = None, None, None
-    pa.default_memory_pool().release_unused()
+    validation_df = scoring_window(load_validation(), config.max_eras)
 
-    validation_df = load_validation().dropna(subset=["target"])
-    if config.max_eras is not None:
-        validation_df = _last_eras(validation_df, config.max_eras)
-
-    predictions = predict_each(fitted, validation_df, feature_columns)
+    predictions = predict_each(fit.models, validation_df)
 
     frame = validation_df[["era", "target"]].copy()
     for name, preds in predictions.items():
@@ -133,10 +107,10 @@ def fit_validation_predictions(
             {
                 "data_version": config.data_version,
                 "feature_set": config.feature_set,
-                "feature_count": len(feature_columns),
+                "feature_count": len(union_columns(strategy, feature_sets)),
                 "max_eras": config.max_eras,
                 "strategy": asdict(strategy),
-                "train_eras": train_eras,
+                "train_eras": fit.train_eras,
                 "validation_eras": len(frame["era"].unique()),
                 "validation_rows": len(frame),
             },

@@ -58,10 +58,9 @@ from functools import partial
 from pathlib import Path
 
 from zemir.config import LIVE, SMOKE, STRATEGIES, smoke as smoke_strategy
-from zemir.data import feature_columns as _feature_columns
-from zemir.data import load_split
+from zemir.data import load_split, resolve_feature_sets
 from zemir.harness import fit_validation_predictions
-from zemir.strategy import Strategy
+from zemir.strategy import Strategy, union_columns
 
 
 def _with_xgboost_overrides(strategy: Strategy, overrides: Mapping[str, object]) -> Strategy:
@@ -123,6 +122,13 @@ def main() -> None:
     strategy = STRATEGIES[args.strategy]
     if args.smoke:
         strategy = smoke_strategy(strategy)
+    if args.feature_set is not None:
+        # A width-comparison knob: every model at one width, not just the run's
+        # default universe — a spec names its own `features` now.
+        strategy = replace(
+            strategy,
+            models=tuple(replace(m, features=args.feature_set) for m in strategy.models),
+        )
 
     xgb_overrides = {}
     if args.colsample_bytree is not None:
@@ -179,15 +185,16 @@ def main() -> None:
 
     # Narrowed before either split is read off disk (issue #45's dropped
     # columns), not after — see fit_validation_predictions' docstring.
-    columns = _feature_columns(config.data_version, config.feature_set)
-    if drop_features:
-        columns = [c for c in columns if c not in drop_features]
+    feature_sets = resolve_feature_sets(
+        config.data_version, strategy.feature_set_names, drop=drop_features or frozenset()
+    )
+    columns = list(union_columns(strategy, feature_sets))
 
     result = fit_validation_predictions(
         config,
         strategy,
         run_id=run_id,
-        feature_columns=columns,
+        feature_sets=feature_sets,
         load_train=partial(
             load_split,
             config.data_version,

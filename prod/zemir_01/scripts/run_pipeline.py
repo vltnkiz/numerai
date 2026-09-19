@@ -32,7 +32,7 @@ from zemir.config import (
     PRODUCTION_STRATEGY,
     SUBMISSION_MODEL_SLOT,
 )
-from zemir.data import download
+from zemir.data import download, resolve_feature_sets
 from zemir.pipeline import append_score_log, run_pipeline, submit_predictions
 from zemir.schedule import (
     GATE_FAILED,
@@ -44,7 +44,7 @@ from zemir.schedule import (
     require_available_memory,
     round_to_run,
 )
-from zemir.strategy import build_trainers
+from zemir.strategy import required_columns
 
 # Read by Invoke-ZemirLiveRun.ps1. Anything else non-zero is a crash.
 EXIT_GATE_FAILED = 2
@@ -77,15 +77,18 @@ def main() -> int:
         return EXIT_INSUFFICIENT_MEMORY
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    feature_sets = resolve_feature_sets(config.data_version, PRODUCTION_STRATEGY.feature_set_names)
     dataset = download(
-        config.data_version, config.feature_set, target_column=config.target_column
+        config.data_version,
+        required_columns(PRODUCTION_STRATEGY, feature_sets),
+        target_column=config.target_column,
     )
     result = run_pipeline(
         config,
         run_id=run_id,
-        trainers=build_trainers(PRODUCTION_STRATEGY),
+        strategy=PRODUCTION_STRATEGY,
+        feature_sets=feature_sets,
         dataset=dataset,
-        blend=PRODUCTION_STRATEGY.blend,
     )
 
     print(f"run_id: {result.run_id}")

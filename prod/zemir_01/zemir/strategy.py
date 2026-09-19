@@ -14,7 +14,7 @@ Deliberately its own module, not part of `config.py`: `config.py` is named
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -61,10 +61,11 @@ class ModelSpec:
     way a plain string does, and would forfeit the "a Strategy is plain,
     serializable data" property this module exists for.
 
-    `features` is a real field even though every shipped spec names
-    `"medium"` for now — per-model feature widths are #80's machinery, not
-    this ticket's; the field exists now so nothing downstream has to add it
-    later.
+    `features` names a feature set (`"small"`/`"medium"`/`"all"`), and is what
+    the model is actually fitted and predicted on — `zemir.fitting` hands each
+    spec its own slice of the union of every spec's columns (#80).
+    `PipelineConfig.feature_set` is a different thing: the run's default
+    universe for scoring and neutralization, not what any model trains on.
 
     `engineering` (e.g. `train_sgd`'s fixed feature scaling) is deliberately
     absent: no code would read it yet (see #74's Not-yet-specified), and a
@@ -98,6 +99,51 @@ class Strategy:
     models: tuple[ModelSpec, ...]
     blend: BlendSpec
 
+    @property
+    def feature_set_names(self) -> tuple[str, ...]:
+        """Every distinct feature set a model names, in first-seen order."""
+        return tuple(dict.fromkeys(spec.features for spec in self.models))
+
+
+# Feature-set name -> its columns, as `zemir.data.resolve_feature_sets` builds it.
+FeatureSets = Mapping[str, Sequence[str]]
+
+
+def model_columns(spec: ModelSpec, feature_sets: FeatureSets) -> tuple[str, ...]:
+    """The columns `spec` is fitted and predicted on."""
+    try:
+        return tuple(feature_sets[spec.features])
+    except KeyError:
+        raise KeyError(
+            f"model {spec.name!r} names feature set {spec.features!r}, which was not "
+            f"resolved (have: {sorted(feature_sets)})"
+        ) from None
+
+
+def union_columns(strategy: Strategy, feature_sets: FeatureSets) -> tuple[str, ...]:
+    """Every column any model trains on, once each, in first-seen order.
+
+    The order is load-bearing, not cosmetic: a model whose columns are the
+    whole union is handed the union frame itself (see `zemir.fitting`), and
+    tree stages sample columns by position — so a strategy whose models all
+    name one feature set must see that set's own column order, unchanged.
+    """
+    return tuple(
+        dict.fromkeys(c for spec in strategy.models for c in model_columns(spec, feature_sets))
+    )
+
+
+def required_columns(strategy: Strategy, feature_sets: FeatureSets) -> list[str]:
+    """What a live run must load: the training union, plus blend neutralizers outside it.
+
+    `run_pipeline` reads the neutralizer columns off the live frame, and a
+    strategy whose models are narrower than its neutralizer set would
+    otherwise fail there rather than at load.
+    """
+    return list(
+        dict.fromkeys((*union_columns(strategy, feature_sets), *(strategy.blend.neutralize or ())))
+    )
+
 
 def build_trainer(spec: ModelSpec) -> Trainer:
     """A `zemir.models.Trainer` that fits `spec.trainer` with `spec.params` baked in."""
@@ -107,15 +153,3 @@ def build_trainer(spec: ModelSpec) -> Trainer:
         return fit(X, y, era, **spec.params)
 
     return trainer
-
-
-def build_trainers(strategy: Strategy) -> dict[str, Trainer]:
-    """One `Trainer` per `ModelSpec` in `strategy`, keyed by its own name.
-
-    Same shape as `zemir.config.build_trainers`'s return value, so it drops
-    straight into `zemir.pipeline.fit_models`/`predict_each` unchanged — two
-    `ModelSpec`s naming the same `trainer` (e.g. two `era_boost`s at
-    different depths) collide on trainer name today; they don't collide here,
-    since each keys off its own `ModelSpec.name` instead.
-    """
-    return {spec.name: build_trainer(spec) for spec in strategy.models}
