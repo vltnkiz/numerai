@@ -44,11 +44,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 
 from zemir.data import scoring_window
+from zemir.models import FittedModel
 from zemir.strategy import (
     FeatureSets,
     ModelSpec,
@@ -59,27 +59,31 @@ from zemir.strategy import (
 )
 
 
-@dataclass(frozen=True)
-class FittedSpec:
-    """A fitted model, bound to the columns it was fitted on.
-
-    Predicting on the wrong columns is silent — a tree stage indexes by
-    position — so the columns travel with the model, and `predict` takes a
-    frame of *any* width that contains them.
-    """
-
-    spec: ModelSpec
-    columns: tuple[str, ...]
-    model: object
-
-    def predict(self, df: pd.DataFrame) -> np.ndarray:
-        return self.model.predict(df[list(self.columns)])
-
-
 @dataclass
 class StrategyFit:
-    models: dict[str, FittedSpec]  # keyed by `ModelSpec.name`, in declared order
+    models: dict[str, FittedModel]  # keyed by `ModelSpec.name`, in declared order
     train_eras: int
+
+
+def _checked(fitted: object, spec: ModelSpec, columns: tuple[str, ...]) -> FittedModel:
+    """`fitted`, once it is known to be bound to exactly the columns `spec` was handed.
+
+    A `FittedModel` carries its own columns, taken by the trainer from the frame
+    it was handed — so this is the one place the two are compared, and it fails
+    loudly: a model bound to other columns would predict on the wrong ones
+    without complaint.
+    """
+    if not isinstance(fitted, FittedModel):
+        raise TypeError(
+            f"trainer {spec.trainer!r} for model {spec.name!r} returned "
+            f"{type(fitted).__name__}, not a FittedModel"
+        )
+    if fitted.columns != columns:
+        raise ValueError(
+            f"model {spec.name!r} was fitted on {len(fitted.columns)} columns that are not the "
+            f"{len(columns)} its feature set {spec.features!r} names"
+        )
+    return fitted
 
 
 def fit_strategy(
@@ -106,15 +110,15 @@ def fit_strategy(
     columns = {spec.name: model_columns(spec, feature_sets) for spec in strategy.models}
     fit_order = sorted(strategy.models, key=lambda spec: len(columns[spec.name]))
 
-    fitted: dict[str, FittedSpec] = {}
+    fitted: dict[str, FittedModel] = {}
     for position, spec in enumerate(fit_order):
         pa.default_memory_pool().release_unused()
         spec_columns = columns[spec.name]
         X_spec = X if spec_columns == union else X[list(spec_columns)]
         if position == len(fit_order) - 1:
             X = None  # the last model needs nothing but its own slice
-        fitted[spec.name] = FittedSpec(
-            spec=spec, columns=spec_columns, model=build_trainer(spec)(X_spec, y, era)
+        fitted[spec.name] = _checked(
+            build_trainer(spec)(X_spec, y, era), spec, spec_columns
         )
         X_spec = None
 

@@ -10,15 +10,17 @@ import gc
 import weakref
 from dataclasses import replace
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from zemir import fitting
 from zemir.fitting import fit_strategy
+from zemir.models import FittedModel
 from zemir.pipeline import predict_each
 from zemir.strategy import TRAINERS, BlendSpec, ModelSpec, Strategy
 
-from factories import FEATURE_COLUMNS, FEATURE_SETS, PredictColumn, make_dataset
+from factories import FEATURE_COLUMNS, FEATURE_SETS, PredictColumn, fitted_predicting, make_dataset
 
 
 class Recorder:
@@ -31,13 +33,13 @@ class Recorder:
         self.refs: dict[str, weakref.ref] = {}
         self.dead_at_fit: dict[str, dict[str, bool]] = {}
 
-    def __call__(self, X, y, era, *, tag: str, column: str) -> PredictColumn:
+    def __call__(self, X, y, era, *, tag: str, column: str) -> FittedModel:
         self.events.append(f"fit:{tag}")
         self.columns[tag] = tuple(X.columns)
         self.frame_ids[tag] = id(X)
         self.dead_at_fit[tag] = {t: ref() is None for t, ref in self.refs.items()}
         self.refs[tag] = weakref.ref(X)
-        return PredictColumn(column)
+        return fitted_predicting(X, column)
 
 
 @pytest.fixture
@@ -82,10 +84,12 @@ def test_two_specs_at_different_widths_fit_and_predict_on_their_own_columns(reco
     predictions = predict_each(result.models, dataset.validation)
     assert predictions["narrow"].tolist() == dataset.validation["feature_a"].tolist()
     assert predictions["wide"].tolist() == dataset.validation["feature_c"].tolist()
-    # Predicting hands each model exactly the columns it was fitted on, from a
-    # frame that has far more of them.
-    assert result.models["narrow"].model.predicted_on == ["feature_a"]
-    assert result.models["wide"].model.predicted_on == FEATURE_COLUMNS
+    # Each model is bound to exactly the columns it was fitted on, and predicting
+    # hands it just those, from a frame that has far more of them.
+    assert result.models["narrow"].columns == ("feature_a",)
+    assert result.models["wide"].columns == tuple(FEATURE_COLUMNS)
+    assert result.models["narrow"].estimator.predicted_width == 1
+    assert result.models["wide"].estimator.predicted_width == len(FEATURE_COLUMNS)
 
 
 def test_a_spec_naming_the_whole_union_is_handed_the_union_frame_itself(recorder):
@@ -131,7 +135,7 @@ def test_the_wide_train_frame_is_gone_before_any_trainer_runs(monkeypatch):
                 if isinstance(o, pd.DataFrame) and "target" in o.columns and len(o) == len(dataset.train)
             )
         )
-        return PredictColumn(column)
+        return fitted_predicting(X, column)
 
     monkeypatch.setitem(TRAINERS, "counting", counting_trainer)
     counting = ModelSpec(name="m", features="medium", trainer="counting", params={"column": "feature_a"})
@@ -207,5 +211,26 @@ def test_fit_order_does_not_change_what_a_model_learns():
             a[name].predict(dataset.validation).tolist()
             == b[name].predict(dataset.validation).tolist()
         )
-    assert a["narrow"].model.coef_.shape == (1,)
-    assert a["wide"].model.coef_.shape == (3,)
+    assert a["narrow"].estimator.coef_.shape == (1,)
+    assert a["wide"].estimator.coef_.shape == (3,)
+
+
+def test_a_trainer_that_binds_its_model_to_other_columns_fails_loudly(monkeypatch):
+    # The columns a FittedModel carries are the trainer's own claim about what it
+    # was fitted on; `fit_strategy` is the one place that checks it against what
+    # the spec's feature set names.
+    def fits_on_one_column(X, y, era, **_):
+        return FittedModel(PredictColumn(0), ("feature_a",), dtype=np.float64)
+
+    monkeypatch.setitem(TRAINERS, "misbound", fits_on_one_column)
+    misbound = ModelSpec(name="m", features="medium", trainer="misbound")
+
+    with pytest.raises(ValueError, match="model 'm' was fitted on 1 columns that are not the 3"):
+        fit(strategy_of(misbound), make_dataset())
+
+
+def test_a_trainer_that_returns_a_bare_estimator_fails_loudly(monkeypatch):
+    monkeypatch.setitem(TRAINERS, "bare", lambda X, y, era, **_: PredictColumn(0))
+
+    with pytest.raises(TypeError, match="returned PredictColumn, not a FittedModel"):
+        fit(strategy_of(ModelSpec(name="m", features="medium", trainer="bare")), make_dataset())

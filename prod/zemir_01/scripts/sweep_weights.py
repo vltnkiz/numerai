@@ -20,7 +20,7 @@ from pathlib import Path
 import pandas as pd
 
 from zemir.config import weight_sweep
-from zemir.harness import HARNESS_DIR, PREDICTIONS_FILENAME, score_configs
+from zemir.harness import HARNESS_DIR, PREDICTIONS_FILENAME, load_fit_record, score_configs
 
 REPORTED_COLUMNS = [
     "eras",
@@ -52,12 +52,15 @@ def main() -> None:
     args = parser.parse_args()
 
     run_dir = HARNESS_DIR / args.run_id if args.run_id else latest_cache(HARNESS_DIR)
-    configs = weight_sweep(
+    record = load_fit_record(run_dir)
+    strategies = weight_sweep(
+        record.strategy,
         tuple(args.models),
+        features=record.feature_set,
         resolution=args.resolution,
         neutralization_proportion=args.proportion,
     )
-    result = score_configs(configs, run_dir=run_dir)
+    result = score_configs(strategies, run_dir=run_dir)
 
     ranked = result.summary.sort_values("payout", ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):
