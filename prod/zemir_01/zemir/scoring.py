@@ -57,51 +57,6 @@ def score_validation(
     )
 
 
-def project(scores: np.ndarray, exposures: np.ndarray) -> np.ndarray:
-    """The linear component of `scores` explained by `exposures` (plus an intercept).
-
-    Solved with `lstsq` rather than by forming `pinv(exposures)`: both take the
-    minimum-norm least-squares solution and agree to ~1e-15, but lstsq never
-    materializes the pseudo-inverse and is roughly twice as fast — which matters
-    because a sweep solves this once per era.
-    """
-    exposures = np.hstack((exposures, np.ones((len(exposures), 1))))
-    return exposures @ np.linalg.lstsq(exposures, scores, rcond=None)[0]
-
-
-def neutralize(
-    df: pd.DataFrame,
-    columns: list[str],
-    neutralizers: list[str],
-    proportion: float,
-) -> np.ndarray:
-    """Remove `proportion` of the linear component of `columns` explained by `neutralizers`."""
-    scores = df[columns].values
-    return scores - proportion * project(scores, df[neutralizers].values)
-
-
-def neutralize_predictions(
-    df: pd.DataFrame,
-    neutralizers: list[str],
-    proportion: float,
-    *,
-    prediction_col: str = "prediction",
-    era_col: str = "era",
-) -> pd.Series:
-    # Grouped manually rather than via groupby().apply(): pandas collapses a
-    # single-group apply() result into a DataFrame instead of a Series, and
-    # live data is always a single era.
-    parts = [
-        pd.Series(
-            neutralize(era_df, [prediction_col], neutralizers, proportion).ravel(),
-            index=era_df.index,
-        )
-        for _, era_df in df.groupby(era_col, group_keys=False)
-    ]
-    neutralized = pd.concat(parts).loc[df.index]
-    return neutralized.rename(f"{prediction_col}_neutralized")
-
-
 def rank_normalize(predictions: pd.Series) -> pd.Series:
     """Rescale to (0, 1) exclusive — Numerai rejects submissions outside that range."""
     n = len(predictions)
@@ -280,28 +235,3 @@ def summarize_era_scores(
 def _smart_sharpe(corrs: pd.Series) -> float:
     values = corrs.to_numpy(dtype=float)
     return float(values.mean() / (values.std(ddof=1) * _autocorr_penalty(values)))
-
-
-def era_feature_projection(
-    df: pd.DataFrame,
-    columns: list[str],
-    neutralizers: list[str],
-    *,
-    era_col: str = "era",
-) -> pd.DataFrame:
-    """Per-era linear component of every column in `columns`, as `neutralize` computes it.
-
-    Neutralizing at proportion `p` is `scores - p * projection` — affine in `p`,
-    and the projection does not depend on `p` at all. So a sweep over proportions
-    and blends costs one least-squares solve per era rather than one per
-    configuration, which is the difference between minutes and an hour.
-    """
-    parts = [
-        pd.DataFrame(
-            project(era_df[columns].to_numpy(dtype=float), era_df[neutralizers].values),
-            index=era_df.index,
-            columns=columns,
-        )
-        for _, era_df in df.groupby(era_col, group_keys=False)
-    ]
-    return pd.concat(parts).loc[df.index]

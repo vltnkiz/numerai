@@ -11,17 +11,18 @@ import pandas as pd
 from dotenv import load_dotenv
 from numerapi import NumerAPI
 
+from zemir.blend import blend_strategies, combine_predictions
 from zemir.config import PipelineConfig
 from zemir.data import Dataset, scoring_window
-from zemir.fitting import FittedSpec, fit_strategy
+from zemir.fitting import fit_strategy
+from zemir.models import FittedModel
 from zemir.scoring import (
     ValidationScore,
-    neutralize_predictions,
     rank_normalize,
     score_validation,
     validate_predictions,
 )
-from zemir.strategy import FeatureSets, Strategy
+from zemir.strategy import FeatureSets, Strategy, neutralizer_columns
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
@@ -50,33 +51,6 @@ class PipelineResult:
     combined_validation_score: ValidationScore
     live_predictions: pd.Series
     live_predictions_neutralized: pd.Series
-
-
-def combine_predictions(
-    predictions: dict[str, pd.Series],
-    era: pd.Series,
-    weights: Mapping[str, float] | None = None,
-) -> pd.Series:
-    """Weighted average of each model's predictions, ranked per era first.
-
-    `weights` need not sum to 1 — it is normalized internally — and `None`
-    means equal weight, so unweighted callers see identical behavior to before.
-
-    A lone model is returned untouched rather than ranked. That is not a
-    shortcut: whatever happens next — neutralization above all — sees the raw
-    prediction, and ranking first would change the result. Keeping the rule here
-    means the harness and the pipeline cannot disagree about what "combined" means.
-    """
-    if len(predictions) == 1:
-        return next(iter(predictions.values())).rename("prediction")
-    ranked = {name: preds.groupby(era).rank(pct=True) for name, preds in predictions.items()}
-    if weights is None:
-        combined = sum(ranked.values()) / len(ranked)
-    else:
-        combined = sum(ranked[name] * weights[name] for name in ranked) / sum(
-            weights[name] for name in ranked
-        )
-    return combined.rename("prediction")
 
 
 def _load_numerai_models(env: dict[str, str] | None = None) -> dict[str, str]:
@@ -143,7 +117,7 @@ def submit_predictions(
 
 
 def predict_each(
-    fitted_models: Mapping[str, FittedSpec], df: pd.DataFrame
+    fitted_models: Mapping[str, FittedModel], df: pd.DataFrame
 ) -> dict[str, pd.Series]:
     """Each model's predictions on `df`, each drawn from its own columns."""
     return {
@@ -172,7 +146,12 @@ def run_pipeline(
     `zemir.strategy.required_columns` — since each model is fitted on its own
     slice of it (`zemir.fitting`, which owns the memory discipline of the fit;
     `dataset.train` stays the caller's, resident for the whole run, exactly as
-    before). `feature_sets` resolves each `ModelSpec.features` name to columns.
+    before) and every neutralization projects onto columns it names.
+    `feature_sets` resolves each feature-set name, on a model or a
+    neutralization, to columns.
+
+    `live_predictions.csv` is the raw blend, before any neutralization at all;
+    `live_predictions_neutralized.csv` is what `zemir.blend` returns, ranked.
 
     Never submits and never gates: submission is a separate step
     (`submit_predictions`), and the validation-score gate that guards it lives
@@ -182,12 +161,8 @@ def run_pipeline(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     blend = strategy.blend
-    # `None` neutralizers means everything the run loaded.
-    neutralizers = (
-        list(blend.neutralize) if blend.neutralize is not None else dataset.feature_columns
-    )
 
-    _write_run_config(run_dir, config, strategy=strategy, neutralizers=neutralizers)
+    _write_run_config(run_dir, config, strategy=strategy, feature_sets=feature_sets)
 
     fit = fit_strategy(
         strategy,
@@ -221,11 +196,15 @@ def run_pipeline(
     )
     live_predictions.to_frame().to_csv(run_dir / "live_predictions.csv")
 
-    live_for_neutralization = dataset.live[["era"] + neutralizers].copy()
-    live_for_neutralization["prediction"] = live_predictions
-    live_predictions_neutralized = neutralize_predictions(
-        live_for_neutralization, neutralizers, blend.proportion
-    )
+    # The same transform the harness scores (`zemir.blend`), here as the one-strategy
+    # case: per-model neutralization, the blend, then the blend's neutralization.
+    live_predictions_neutralized = blend_strategies(
+        {"live": strategy},
+        pd.DataFrame(live_predictions_by_model),
+        dataset.live,
+        dataset.live["era"],
+        feature_sets,
+    )["live"].rename("prediction_neutralized")
     live_predictions_neutralized = rank_normalize(live_predictions_neutralized)
     live_predictions_neutralized.to_frame().to_csv(run_dir / "live_predictions_neutralized.csv")
 
@@ -246,24 +225,38 @@ def _write_run_config(
     config: PipelineConfig,
     *,
     strategy: Strategy,
-    neutralizers: list[str] | None,
+    feature_sets: FeatureSets,
 ) -> None:
     """Record what produced this run's scores, so a comparison is attributable."""
     blend = strategy.blend
-    (run_dir / "config.json").write_text(
-        json.dumps(
-            {
-                **asdict(config),
-                "models": sorted(spec.name for spec in strategy.models),
-                "model_features": {spec.name: spec.features for spec in strategy.models},
-                "model_weights": dict(blend.weights) if blend.weights is not None else None,
-                "neutralization_proportion": blend.proportion,
-                "neutralizer_count": len(neutralizers) if neutralizers else 0,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    blend_neutralization = blend.neutralization
+    record = {
+        **asdict(config),
+        "models": sorted(spec.name for spec in strategy.models),
+        "model_features": {spec.name: spec.features for spec in strategy.models},
+        "model_weights": dict(blend.weights) if blend.weights is not None else None,
+        "neutralization_proportion": (
+            blend_neutralization.proportion if blend_neutralization is not None else 0.0
+        ),
+        "neutralizer_count": (
+            len(neutralizer_columns(blend_neutralization, feature_sets))
+            if blend_neutralization is not None
+            else 0
+        ),
+    }
+    # Written only when a model neutralizes: the key records what was applied, and
+    # a strategy that applies nothing per model keeps the record it always had.
+    per_model = {
+        spec.name: {
+            "proportion": spec.neutralization.proportion,
+            "neutralizer_count": len(neutralizer_columns(spec.neutralization, feature_sets)),
+        }
+        for spec in strategy.models
+        if spec.neutralization is not None
+    }
+    if per_model:
+        record["model_neutralization"] = per_model
+    (run_dir / "config.json").write_text(json.dumps(record, indent=2, sort_keys=True))
 
 
 def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:

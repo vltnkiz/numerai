@@ -176,16 +176,25 @@ It is split at the only expensive seam, so a comparison never pays to refit:
 
 | Command | Cost | Writes |
 | --- | --- | --- |
-| `python scripts/fit_harness.py --strategy zemir_01` | ~1 h | `runs/harness/<run_id>/validation_predictions.parquet` + `fit_config.json` |
+| `python scripts/fit_harness.py --strategy zemir_01` | ~1 h | `runs/harness/<run_id>/validation_predictions.parquet` + `fit_config.json` + `models/<name>/` (each fitted model) |
 | `python scripts/fit_harness.py --strategy zemir_01 --smoke` | seconds | the same, at meaningless scale |
-| `python scripts/score_harness.py [run_id]` | minutes | `scores.csv`, `era_corr.csv`, `era_mmc.csv`, `era_max_feature_corr.csv`, `scoring_config.json` |
+| `python scripts/score_harness.py [run_id]` | minutes | `scores.csv`, `era_corr.csv`, `era_mmc.csv`, `era_max_feature_corr.csv`, `scoring_strategies.json` |
+| `python scripts/explain_harness.py [run_id] [--top N]` | seconds | nothing — prints each model's coefficients (linear) or weight/gain/cover (booster) |
 
 Fitting caches every model's raw validation predictions once. Scoring sweeps
-combinations and neutralization proportions over that cache and can be re-run
-freely. **Anything that changes a model** — hyperparameters, feature set,
+blends and neutralizations over that cache and can be re-run freely. **Anything that changes a model** — hyperparameters, feature set,
 training eras — invalidates the cache and needs a new fit; anything downstream
 of `.predict()` does not. `score_harness.py` reads the cache's own
 `fit_config.json`, so a sweep cannot be scored against the wrong dataset.
+
+The fitted models are kept beside the predictions (`FittedModel.save`: a
+booster as XGBoost's `.ubj`, a linear model as its coefficients in an `.npz`,
+never a pickle — a cache is read weeks later, by a possibly newer library), so
+asking a model a question is `explain_harness.py`, not a refit. A cache fitted
+before this has no `models/` directory; `explain_harness.py` says so and stops,
+and `score_harness.py` and the sweeps never look there. Its output describes
+those fits exactly and is not an estimate of what matters in the data (see
+CONTEXT.md, "Explanation"). It is gain/weight scale only; there is no SHAP.
 
 ### What it measures, and why those metrics
 
@@ -205,8 +214,21 @@ harness uses `numerai-tools`, Numerai's own reference implementation, for both:
 `rank_normalize` is deliberately not applied: all of the above rank internally,
 so it is provably free (verified to `0.00e+00`).
 
-A `ScoringConfig` names one row of the comparison table — which models, and at
-what neutralization proportion. `proportion = 0.0` *is* "no neutralization".
+Each row of the comparison table is a `Strategy` — the same type production
+ships — scored through `zemir/blend.py`, the one transform from per-model
+predictions to the blended, neutralized prediction. The live run is its
+one-strategy case, so the harness cannot measure something the live run does
+not do. A row may differ from what the cache was fitted with only in what needs
+no refit: the blend weights and every neutralization. `score_harness.py` checks
+the rest (`features`, `trainer`, `params`) against the strategy the cache
+recorded in `fit_config.json`, and refuses a mismatch. A cache fitted before
+that was recorded can only be checked by model name, and its output says
+`unverified`.
+
+The table always carries a `production` row: `PRODUCTION_STRATEGY` scored like
+every other row. Its payout is the baseline. A cache that cannot express it (a
+model missing, or fitted with other hyperparameters) prints `BASELINE
+UNAVAILABLE` and the reason rather than substituting a nearby row.
 
 ## Configuration
 
@@ -228,13 +250,23 @@ fit today, and `PRODUCTION_STRATEGY` is the one `run_pipeline.py` submits.
 Each `ModelSpec` names its own `features`, and that is what the model is
 fitted and predicted on: `zemir/fitting.py` loads the union of every model's
 columns once and hands each model its own slice. `PipelineConfig.feature_set`
-is the run's default universe for scoring and neutralization, not a model's
-width. That module also owns the fit's memory discipline (see its docstring
-before touching anything that allocates), so callers cannot scatter it.
+is the universe the harness measures feature exposure against, not a model's
+width and not what anything is neutralized against. That module also owns the
+fit's memory discipline (see its docstring before touching anything that
+allocates), so callers cannot scatter it.
+
+Neutralization is a `Neutralization(proportion, features)` held by a
+`ModelSpec` (applied to that model's predictions before the blend) and by the
+`BlendSpec` (applied to the blend), each independently, with `None` meaning that
+stage applies nothing. `features` is always written down: a feature-set name or
+a tuple of columns, never a default. Production sets it on the blend only.
+Per-model neutralization is a capability, not a shipped strategy — try one by
+defining a `Strategy`, not by adding a flag.
 
 Every run writes a `config.json` next to its scores recording the config, the
 models fitted and the feature set each named, the blend weights and
-neutralization proportion, and the neutralizer count — so a comparison between
+neutralization proportion, and the neutralizer count — plus a
+`model_neutralization` entry when a model neutralizes — so a comparison between
 two runs is attributable rather than folklore.
 
 ## Scale: smoke vs full

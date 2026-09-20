@@ -1,45 +1,295 @@
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.linear_model import LinearRegression, Ridge, SGDRegressor
 import xgboost as xgb
 
-# (features, target, era) -> a fitted object exposing .predict(features)
-Trainer = Callable[[pd.DataFrame, pd.Series, pd.Series], object]
 
+@dataclass(frozen=True)
+class FittedModel:
+    """A trained estimator, bound to the columns it was fitted on and to how it is fed.
 
-def train_linear(X: pd.DataFrame, y: pd.Series) -> LinearRegression:
-    model = LinearRegression()
-    model.fit(X, y)
-    return model
+    Predicting on the wrong columns is silent — a tree stage indexes by
+    position — so the columns travel with the model, and `predict` takes a
+    frame of *any* width that contains them. Nothing here remembers which
+    `ModelSpec` produced it (see CONTEXT.md, "Fitted model").
 
+    Everything that differs between the trainers at predict time is *data* on
+    this one class, so there is one predict path to get right rather than one
+    adapter per trainer:
 
-@dataclass
-class _Float32Predictor:
-    """Wraps a fitted sklearn model to keep both fit and predict inputs float32.
+    - `dtype` is what the estimator is fed. `zemir.data` reads Numerai's
+      features as int8, and sklearn's `check_array` upcasts anything that
+      isn't already float32/float64 to float64 before fitting *or predicting*.
+      At `all` width that float64 design matrix is the thing issue #45 found
+      doesn't fit in memory, and feeding it int8 at predict time (over the
+      ~4M-row validation set) would reproduce the same blowup one call later.
+      Casting explicitly, rather than trusting sklearn's implicit upcast, is
+      what makes the width of the cast a decision instead of an accident. It
+      is a value the trainer records at fit time, not a property of a class
+      chosen by trainer name, so a model at another precision is a different
+      `dtype=`, not a different type.
+    - `order` is the memory layout of that cast: `"K"` keeps the input's own
+      (a frame's block is column-major), `"C"` forces row-major. It is data
+      because it changes the *bits*, not just speed — BLAS sums a column-major
+      and a row-major matrix in a different order — so a model's numbers are
+      only reproduced by feeding it the layout they were established with.
+    - `chunk_rows`, when set, predicts in row slices rather than casting the
+      whole input at once: the single-shot cast over the ~4M-row validation set
+      is ~51GB at `all` width for a float32 linear model and ~54GB for the
+      booster (issue #51). `None` predicts in one shot.
+    - `transform`, when set, is applied in place to each cast slice before the
+      estimator sees it — the *same* function the trainer applied while
+      fitting, because the trainer trains through this object (see
+      `train_sgd`) rather than keeping its own copy of the rule.
 
-    `zemir.data` reads Numerai's features as int8; sklearn's `check_array`
-    upcasts anything that isn't already float32/float64 to float64 before
-    fitting *or predicting*. At `all` width that float64 design matrix is the
-    thing issue #45 found doesn't fit in memory — feeding it int8 or float64
-    at predict time (e.g. over the ~4M-row validation set) would reproduce the
-    exact same blowup one call later. Casting explicitly at both ends, rather
-    than trusting sklearn's dtype-preserving fast path, is what actually keeps
-    it float32 throughout.
+    A booster is predicted with `inplace_predict`, which takes the still-int8
+    array directly (measured bit-identical to passing float32), so its `dtype`
+    is int8 and a slice costs only XGBoost's own per-slice handling.
+
+    `estimator` is the one named door to the trained object (`explain`, and
+    tests reaching for `.coef_`). It may be anything exposing `.predict` —
+    a test double needs no sklearn.
     """
 
-    model: object
+    estimator: object
+    columns: tuple[str, ...]
+    dtype: npt.DTypeLike
+    order: Literal["K", "C"] = "K"
+    chunk_rows: int | None = None
+    transform: Callable[[np.ndarray], np.ndarray] | None = None
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return self.model.predict(np.asarray(X, dtype=np.float32))
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        return self._predict_array(df[list(self.columns)].to_numpy(copy=False))
+
+    def explain(self) -> pd.DataFrame:
+        """What this fit leans on: one row per fitted column, in the estimator's own quantities.
+
+        A linear model gives `coef` (signed, in the space the estimator was
+        fitted in — `sgd` is not rescaled, so it reads 2x what OLS would for
+        the same effect); a booster gives `weight` (splits on the feature),
+        `gain` (mean loss reduction per split) and `cover` (mean hessian mass
+        per split). A booster feature it never split on has `weight` 0 and
+        NaN `gain`/`cover` — a mean over zero splits is undefined. The
+        `total_*` importances are left out: `total_gain = weight * gain`, and
+        they are the worst-reproducing of the five (issue #83).
+
+        **This describes this fit exactly. It is not an estimate of what
+        matters in the data**: at production settings a booster's ranking
+        barely reproduces across seeds and a linear model's does not
+        reproduce across time (issue #83), and the columns are not comparable
+        across trainers. An estimator that can do neither raises rather than
+        returning an empty frame, which would read as "the model uses nothing".
+        """
+        index = pd.Index(self.columns, name="feature")
+        if isinstance(self.estimator, xgb.Booster):
+            return pd.DataFrame(
+                {
+                    "weight": self._booster_score("weight", missing=0.0),
+                    "gain": self._booster_score("gain", missing=np.nan),
+                    "cover": self._booster_score("cover", missing=np.nan),
+                },
+                index=index,
+            )
+        coef = getattr(self.estimator, "coef_", None)
+        if coef is None:
+            raise NotImplementedError(
+                f"{type(self.estimator).__name__} exposes neither a booster nor `coef_`, "
+                "so there is nothing for explain() to report"
+            )
+        return pd.DataFrame({"coef": np.asarray(coef, dtype=np.float64)}, index=index)
+
+    def save(self, directory: Path) -> None:
+        """Write this model into `directory`, in formats that outlive a library upgrade.
+
+        Not a pickle: an sklearn estimator's pickle is only readable by the
+        version that wrote it, and a cache is meant to be read weeks later.
+        A booster goes to XGBoost's own `.ubj` model format; a linear model
+        (`LinearRegression`, `Ridge`, `SGDRegressor` — the only sklearn
+        estimators the trainers produce) is reduced to what its `predict` and
+        `explain` read, `coef_` and `intercept_`, as an `.npz`. Its
+        hyperparameters are *not* kept — a reloaded estimator predicts and
+        explains, it is not a model to refit.
+
+        `meta.json` carries everything else `predict` needs (the columns and
+        how the estimator is fed) and is written last, so a directory without
+        it is an interrupted save and `load` refuses it. Anything that cannot
+        be written faithfully — another estimator, a `transform` that is not
+        registered — raises before a byte is written, rather than producing a
+        model that loads and then predicts differently.
+        """
+        transform = None
+        if self.transform is not None:
+            transform = next((n for n, fn in _TRANSFORMS.items() if fn is self.transform), None)
+            if transform is None:
+                raise TypeError(f"transform {self.transform!r} is not registered, so it cannot be saved")
+
+        meta = {
+            "format": _FORMAT_VERSION,
+            "columns": list(self.columns),
+            "dtype": np.dtype(self.dtype).name,
+            "order": self.order,
+            "chunk_rows": self.chunk_rows,
+            "transform": transform,
+        }
+        estimator = self.estimator
+        if isinstance(estimator, xgb.Booster):
+            meta["estimator"] = _BOOSTER
+        elif type(estimator) in _LINEAR_ESTIMATORS.values():
+            meta["estimator"] = type(estimator).__name__
+            coef, intercept = np.asarray(estimator.coef_), np.asarray(estimator.intercept_)
+        else:
+            raise TypeError(f"{type(estimator).__name__} is not an estimator this can save")
+
+        directory.mkdir(parents=True, exist_ok=True)
+        if isinstance(estimator, xgb.Booster):
+            estimator.save_model(str(directory / _BOOSTER_FILE))
+        else:
+            np.savez(directory / _LINEAR_FILE, coef=coef, intercept=intercept)
+        (directory / _META_FILE).write_text(json.dumps(meta, indent=2))
+
+    @classmethod
+    def load(cls, directory: Path) -> FittedModel:
+        """The model `save` wrote into `directory`; raises rather than guessing if it cannot.
+
+        There is no fallback of any kind — a directory that is missing,
+        interrupted, from a newer format or naming an estimator this does not
+        know is an error naming what is wrong, never an empty or refitted model.
+        """
+        meta = json.loads((directory / _META_FILE).read_text())
+        if meta.get("format") != _FORMAT_VERSION:
+            raise ValueError(
+                f"{directory} is format {meta.get('format')!r}; this reads format {_FORMAT_VERSION}"
+            )
+        columns = tuple(meta["columns"])
+        kind = meta["estimator"]
+        if kind == _BOOSTER:
+            estimator: object = xgb.Booster()
+            estimator.load_model(str(directory / _BOOSTER_FILE))
+        elif kind in _LINEAR_ESTIMATORS:
+            with np.load(directory / _LINEAR_FILE) as arrays:
+                coef, intercept = arrays["coef"], arrays["intercept"]
+            if coef.shape != (len(columns),):
+                raise ValueError(
+                    f"{directory} has {coef.shape} coefficients for {len(columns)} columns"
+                )
+            estimator = _LINEAR_ESTIMATORS[kind]()
+            estimator.coef_, estimator.intercept_ = coef, intercept
+            estimator.n_features_in_ = len(columns)
+        else:
+            raise ValueError(f"{directory} names an estimator this does not know: {kind!r}")
+
+        transform = meta["transform"]
+        if transform is not None and transform not in _TRANSFORMS:
+            raise ValueError(f"{directory} names a transform this does not know: {transform!r}")
+        return cls(
+            estimator,
+            columns,
+            dtype=np.dtype(meta["dtype"]),
+            order=meta["order"],
+            chunk_rows=meta["chunk_rows"],
+            transform=None if transform is None else _TRANSFORMS[transform],
+        )
+
+    def _booster_score(self, importance_type: str, *, missing: float) -> np.ndarray:
+        """`get_score` keyed back onto `columns`.
+
+        `train_xgboost` builds its matrix from a numpy array, so the booster
+        knows its features only as `f0..fN`; `columns` is what names them.
+        Every key must be one of those, so a booster that was given real names
+        (and would key by them) fails here rather than silently reading zeros.
+        """
+        values = np.full(len(self.columns), missing, dtype=np.float64)
+        for key, score in self.estimator.get_score(importance_type=importance_type).items():
+            match = re.fullmatch(r"f(\d+)", key)
+            if match is None or int(match[1]) >= len(self.columns):
+                raise ValueError(
+                    f"booster feature {key!r} is not a position within its {len(self.columns)} "
+                    "fitted columns"
+                )
+            values[int(match[1])] = score
+        return values
+
+    def _prepare(self, rows: np.ndarray) -> np.ndarray:
+        """`rows` as the estimator is fed: cast to `dtype`, then `transform`ed.
+
+        Copies only when it has to. A `transform` works in place, so it must
+        never be handed the caller's own array (`copy=True` even if the dtype
+        already matches); with no transform, a matching dtype is passed
+        through as a view.
+        """
+        prepared = rows.astype(self.dtype, order=self.order, copy=self.transform is not None)
+        return prepared if self.transform is None else self.transform(prepared)
+
+    def _predict_array(self, rows: np.ndarray) -> np.ndarray:
+        """The one chunked predict. `predict` is column-checked on top of it;
+        `train_xgboost`'s refit loop, which holds only the array, calls it directly."""
+        if self.chunk_rows is None:
+            return self._predict_prepared(self._prepare(rows))
+        return np.concatenate(
+            [
+                self._predict_prepared(self._prepare(rows[start : start + self.chunk_rows]))
+                for start in range(0, len(rows), self.chunk_rows)
+            ]
+        )
+
+    def _predict_prepared(self, prepared: np.ndarray) -> np.ndarray:
+        if isinstance(self.estimator, xgb.Booster):
+            return self.estimator.inplace_predict(prepared)
+        return self.estimator.predict(prepared)
 
 
-def train_ridge(X: pd.DataFrame, y: pd.Series, *, alpha: float) -> _Float32Predictor:
+# What `FittedModel.save` writes, and the only things `load` will accept back.
+_FORMAT_VERSION = 1
+_META_FILE, _BOOSTER_FILE, _LINEAR_FILE = "meta.json", "booster.ubj", "linear.npz"
+_BOOSTER = "xgboost.Booster"
+_LINEAR_ESTIMATORS = {cls.__name__: cls for cls in (LinearRegression, Ridge, SGDRegressor)}
+
+
+# (features, target, era) -> a FittedModel bound to the columns of `features`
+Trainer = Callable[[pd.DataFrame, pd.Series, pd.Series], FittedModel]
+
+
+def train_linear(X: pd.DataFrame, y: pd.Series) -> FittedModel:
+    """Plain OLS, fitted and predicted at float64.
+
+    Fitted on the frame's own int8 array, not the frame: sklearn upcasts it to
+    float64 either way (the same array, so the same coefficients bit for bit),
+    but a frame would also stamp `feature_names_in_` on the estimator, and
+    `FittedModel` predicts from an array — sklearn would then warn on every
+    call, with `columns` already carrying the names. Deliberately *not*
+    pre-cast to float64 here: `LinearRegression`'s default `copy_X=True` would
+    then copy that array a second time (it shares memory with its input), where
+    the implicit upcast it does itself is the only copy.
+
+    Predicting is where this used to be implicit. `LinearRegression.predict`
+    does not upcast — it hands the int8 frame straight to `X @ coef_`, and
+    numpy's own int8 -> float64 promotion inside that matmul makes a full
+    row-major float64 copy (the ~34GB spike issue #80 measured over the
+    validation set). The cast is now `FittedModel`'s, and explicit, at the same
+    width — and row-major (`order="C"`), because that is the layout those
+    numbers were produced with: a column-major float64 cast, which is what a
+    plain `astype` of a frame's block gives, sums differently and moves the last
+    bits. Not chunked (`chunk_rows` stays `None`), for the same reason as before:
+    chunking would change the GEMM shapes.
+    """
+    columns = tuple(X.columns)
+    model = LinearRegression()
+    model.fit(X.to_numpy(copy=False), y)
+    return FittedModel(model, columns, dtype=np.float64, order="C")
+
+
+def train_ridge(X: pd.DataFrame, y: pd.Series, *, alpha: float) -> FittedModel:
     """OLS's regularized fallback for a wider, ill-conditioned feature set (issue #38).
 
     Plain OLS's normal equations become numerically unstable once the design
@@ -56,6 +306,7 @@ def train_ridge(X: pd.DataFrame, y: pd.Series, *, alpha: float) -> _Float32Predi
     ~50GB WSL cap (the cast alone peaks under it). `Xf` isn't needed
     uncentered afterward, so fitting in place is free.
     """
+    columns = tuple(X.columns)
     Xf = np.asarray(X, dtype=np.float32)
     yf = np.asarray(y, dtype=np.float32)
     del X, y  # the caller's int8 frame is otherwise held for the rest of this
@@ -63,7 +314,7 @@ def train_ridge(X: pd.DataFrame, y: pd.Series, *, alpha: float) -> _Float32Predi
     # the only way it actually shrinks this call's peak.
     model = Ridge(alpha=alpha, copy_X=False)
     model.fit(Xf, yf)
-    return _Float32Predictor(model)
+    return FittedModel(model, columns, dtype=np.float32)
 
 
 def _scale_features(Xf: np.ndarray) -> np.ndarray:
@@ -81,35 +332,11 @@ def _scale_features(Xf: np.ndarray) -> np.ndarray:
     return Xf
 
 
-@dataclass
-class _ScaledSGDPredictor:
-    """Like `_Float32Predictor`, but also applies `train_sgd`'s fixed feature scaling.
-
-    Kept separate from `_Float32Predictor` rather than adding a scaling flag to
-    it: `train_sgd` is additive infrastructure (issue #50) that must not touch
-    the existing Ridge/OLS predict path.
-
-    Predicts in `chunk_rows`-row slices rather than casting the whole input to
-    float32 at once: `_Float32Predictor`'s single-shot cast is exactly what
-    `train_sgd` exists to dodge at `all` width, and predicting is no
-    exception — casting the full ~4M-row validation set to float32 at 3,414
-    columns is ~51GB, the same order of blowup `train_ridge` hits fitting the
-    same width (issue #51). Chunked here for the same reason training is.
-    """
-
-    model: object
-    chunk_rows: int = 200_000
-
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        X_arr = X.to_numpy(dtype=np.int8, copy=False)
-        return np.concatenate(
-            [
-                self.model.predict(
-                    _scale_features(X_arr[start : start + self.chunk_rows].astype(np.float32))
-                )
-                for start in range(0, len(X_arr), self.chunk_rows)
-            ]
-        )
+# A `transform` is a function, and a function cannot be written to disk, so
+# `FittedModel.save` stores its name here and `load` looks it back up. A new
+# transform has to be registered to be persisted. A trainer picks its own
+# transform; `ModelSpec` has no field for one (issue #90).
+_TRANSFORMS = {"scale_features": _scale_features}
 
 
 def train_sgd(
@@ -124,7 +351,7 @@ def train_sgd(
     random_state: int = 0,
     alpha: float = 0.0001,
     eta0: float = 0.01,
-) -> _ScaledSGDPredictor:
+) -> FittedModel:
     """`all`-width escalation past `train_ridge`'s memory ceiling (issue #50).
 
     `train_ridge` casts the full int8 `X` to a float32 design matrix in one
@@ -137,6 +364,13 @@ def train_sgd(
     `copy=False` up front (a pandas-block no-op for a homogeneous-dtype
     frame, not a second resident copy of `X`) purely so chunk slicing is fast
     numpy fancy-indexing rather than repeated `.iloc` calls.
+
+    The `FittedModel` is built around the still-unfitted `SGDRegressor` and
+    every fit-time slice goes through its `_prepare`, the very method
+    `predict` uses. The feature scaling is therefore applied identically at
+    fit and predict *by construction*, not by two call sites that happen to
+    agree — before this, `_scale_features` was applied here and re-applied by
+    a separate predictor class, with nothing enforcing that they matched.
 
     This trades `train_ridge`'s exact closed-form solution for an
     iterative one — sklearn's own tested `SGDRegressor` implementation,
@@ -174,16 +408,20 @@ def train_sgd(
     holdout_mask = pd.Series(era_values).isin(holdout_eras).to_numpy()
     fit_idx = np.flatnonzero(~holdout_mask)
 
+    columns = tuple(X.columns)
     X_arr = X.to_numpy(dtype=np.int8, copy=False)
     y_arr = y.to_numpy(dtype=np.float32)
     del X, y  # see train_ridge: freed before the loop, not after, to actually shrink peak
 
-    holdout_idx = np.flatnonzero(holdout_mask)
-    X_holdout = _scale_features(X_arr[holdout_idx].astype(np.float32))
-    y_holdout = y_arr[holdout_idx]
-
     rng = np.random.default_rng(random_state)
     model = SGDRegressor(random_state=random_state, alpha=alpha, eta0=eta0)
+    fitted = FittedModel(
+        model, columns, dtype=np.float32, chunk_rows=chunk_rows, transform=_scale_features
+    )
+
+    holdout_idx = np.flatnonzero(holdout_mask)
+    X_holdout = fitted._prepare(X_arr[holdout_idx])
+    y_holdout = y_arr[holdout_idx]
 
     best_score = -np.inf
     stale_epochs = 0
@@ -191,8 +429,7 @@ def train_sgd(
         order = rng.permutation(fit_idx)
         for start in range(0, len(order), chunk_rows):
             chunk = order[start : start + chunk_rows]
-            Xb = _scale_features(X_arr[chunk].astype(np.float32))
-            model.partial_fit(Xb, y_arr[chunk])
+            model.partial_fit(fitted._prepare(X_arr[chunk]), y_arr[chunk])
 
         score = spearmanr(model.predict(X_holdout), y_holdout)[0]
         if score > best_score + 1e-4:
@@ -203,7 +440,7 @@ def train_sgd(
             if stale_epochs >= patience:
                 break
 
-    return _ScaledSGDPredictor(model, chunk_rows=chunk_rows)
+    return fitted
 
 
 class _XGBBatchIter(xgb.DataIter):
@@ -266,36 +503,6 @@ class _XGBBatchIter(xgb.DataIter):
         return True
 
 
-@dataclass
-class _ChunkedBoosterPredictor:
-    """A fitted booster that predicts in row-chunks, off the still-int8 matrix.
-
-    The counterpart to `_ScaledSGDPredictor` for the tree stage, and needed for
-    the same reason: `predict_each` calls this over the ~4M-row validation set,
-    which at `all` width is ~54GB as a single float32 conversion — a larger
-    blowup than training's. `inplace_predict` accepts the int8 array directly
-    (measured bit-identical to passing float32), so a chunk here costs only
-    XGBoost's own internal per-chunk handling, and no explicit cast is made.
-
-    Wraps the raw `Booster` rather than exposing it, so `train_xgboost` keeps
-    returning something whose only interface is `.predict(features)` — what
-    `zemir.pipeline`'s `predict_each` and the `Trainer` contract expect, and
-    what `XGBRegressor` used to provide.
-    """
-
-    booster: xgb.Booster
-    chunk_rows: int = 200_000
-
-    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
-        X_arr = X if isinstance(X, np.ndarray) else X.to_numpy(dtype=np.int8, copy=False)
-        return np.concatenate(
-            [
-                self.booster.inplace_predict(X_arr[start : start + self.chunk_rows])
-                for start in range(0, len(X_arr), self.chunk_rows)
-            ]
-        )
-
-
 def train_xgboost(
     X: pd.DataFrame,
     y: pd.Series,
@@ -309,8 +516,8 @@ def train_xgboost(
     colsample_bytree: float = 0.1,
     random_state: int = 0,
     batch_rows: int = 200_000,
-    on_iteration: Callable[[int, "_ChunkedBoosterPredictor", list], None] | None = None,
-) -> _ChunkedBoosterPredictor:
+    on_iteration: Callable[[int, FittedModel, list], None] | None = None,
+) -> FittedModel:
     """Fit, then repeatedly re-fit on the worst-scoring `proportion` of eras.
 
     The 40-iteration, 2050-tree budget and `proportion=0.5` are the canonical
@@ -365,6 +572,7 @@ def train_xgboost(
     # See train_ridge/train_sgd: `copy=False` is a pandas-block no-op for a
     # homogeneous int8 frame, not a second resident copy, and the caller's
     # bindings are dropped before anything large is allocated.
+    columns = tuple(X.columns)
     X_arr = X.to_numpy(dtype=np.int8, copy=False)
     y_arr = y.to_numpy(dtype=np.float32)
     era_values = era.to_numpy()
@@ -372,7 +580,7 @@ def train_xgboost(
 
     dtrain = xgb.QuantileDMatrix(_XGBBatchIter(X_arr, y_arr, batch_rows=batch_rows))
     booster = xgb.train(params, dtrain, num_boost_round=trees_per_step)
-    predictor = _ChunkedBoosterPredictor(booster, chunk_rows=batch_rows)
+    predictor = FittedModel(booster, columns, dtype=np.int8, chunk_rows=batch_rows)
 
     # `meta` carries only era/target/pred, not X's (up to 3,555-column) feature
     # data — issue #47 found the old `working = X.copy()` held a second
@@ -386,7 +594,7 @@ def train_xgboost(
         on_iteration(0, predictor, [])
 
     for iteration in range(1, num_iters + 1):
-        meta["pred"] = predictor.predict(X_arr)
+        meta["pred"] = predictor._predict_array(X_arr)
         era_scores = (
             meta.groupby("era")
             .apply(lambda d: spearmanr(d["pred"], d["target"])[0])
@@ -413,7 +621,7 @@ def train_xgboost(
         booster = xgb.train(
             params, dworst, num_boost_round=trees_per_step, xgb_model=booster
         )
-        predictor = _ChunkedBoosterPredictor(booster, chunk_rows=batch_rows)
+        predictor = FittedModel(booster, columns, dtype=np.int8, chunk_rows=batch_rows)
 
         if on_iteration is not None:
             on_iteration(iteration, predictor, worst_eras)

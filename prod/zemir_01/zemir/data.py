@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -146,12 +146,16 @@ def load_split(
 
 def load_validation_features(
     version: str,
-    feature_set: str,
+    columns: Sequence[str],
     *,
     eras: list[str] | None = None,
     napi: NumerAPI | None = None,
 ) -> pd.DataFrame:
-    """`era` plus the feature columns, and nothing else.
+    """`era` plus the requested feature columns, and nothing else.
+
+    Takes columns, not a feature-set name, for the same reason `download` does:
+    what scoring needs is the union of the run's scoring universe and every
+    column a strategy's neutralizations name, which no single set describes.
 
     Scoring needs validation features to neutralize against, but must not pay to
     load train and live the way `download` does — those are the fit's business,
@@ -169,10 +173,9 @@ def load_validation_features(
     of the actual per-era neutralization math had run.
     """
     napi = napi or NumerAPI()
-    columns = feature_columns(version, feature_set, napi=napi)
     path = _download_file(napi, version, "validation.parquet", force=False)
     filters = [("era", "in", list(eras))] if eras is not None else None
-    frame = pd.read_parquet(path, columns=["era"] + columns, filters=filters)
+    frame = pd.read_parquet(path, columns=["era", *columns], filters=filters)
     pa.default_memory_pool().release_unused()
     return frame
 
@@ -199,8 +202,8 @@ def download(
     """All three splits at `feature_names` width.
 
     Takes columns, not a feature-set name: a run's width is the union of what
-    its models train on (plus any blend neutralizers), which no single
-    named set describes — see `zemir.strategy.required_columns`.
+    its models train on (plus every column a neutralization names), which no
+    single named set describes — see `zemir.strategy.required_columns`.
     """
     napi = napi or NumerAPI()
 

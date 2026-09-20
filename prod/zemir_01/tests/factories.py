@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from zemir.data import Dataset
+from zemir.models import FittedModel
 from zemir.strategy import ModelSpec
 
 FEATURE_COLUMNS = ["feature_a", "feature_b", "feature_c"]
@@ -66,33 +67,39 @@ def make_dataset(
 
 
 class PredictColumn:
-    """A fitted model whose prediction is just one input column, unchanged.
+    """An estimator whose prediction is just one input column (by position), unchanged.
 
-    Stands in for a real trainer's fitted model — deterministic, and fast
-    enough that a test never needs sklearn/xgboost to exercise the pipeline's
-    own logic (combine, neutralize, score) rather than a model's. Records the
-    columns of the last frame it was asked to predict on, so a test can see
-    exactly what a model was handed.
+    Stands in for a real trainer's estimator — deterministic, and fast enough
+    that a test never needs sklearn/xgboost to exercise the pipeline's own
+    logic (combine, neutralize, score) rather than a model's. Like every
+    estimator inside a `FittedModel` it is handed an array, and it records the
+    width of the last one, so a test can see what a model was handed.
     """
 
-    def __init__(self, column: str, sign: float = 1.0) -> None:
-        self.column = column
+    def __init__(self, position: int, sign: float = 1.0) -> None:
+        self.position = position
         self.sign = sign
-        self.predicted_on: list[str] | None = None
+        self.predicted_width: int | None = None
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        self.predicted_on = list(X.columns)
-        return self.sign * X[self.column].to_numpy(dtype=float)
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        self.predicted_width = X.shape[1]
+        return self.sign * X[:, self.position].astype(float)
 
 
-def fit_predict_column(X, y, era, *, column: str, **_: object) -> PredictColumn:
+def fitted_predicting(X: pd.DataFrame, column: str, sign: float = 1.0) -> FittedModel:
+    """What a fake trainer returns: a `FittedModel` over `X`'s columns that predicts `column`."""
+    columns = tuple(X.columns)
+    return FittedModel(PredictColumn(columns.index(column), sign), columns, dtype=np.float64)
+
+
+def fit_predict_column(X, y, era, *, column: str, **_: object) -> FittedModel:
     """A trainer (registered as `predict_column`) that fits nothing and predicts `column`."""
-    return PredictColumn(column)
+    return fitted_predicting(X, column)
 
 
-def fit_predict_negated_column(X, y, era, *, column: str, **_: object) -> PredictColumn:
+def fit_predict_negated_column(X, y, era, *, column: str, **_: object) -> FittedModel:
     """A trainer (registered as `predict_negated_column`) that predicts `-column`."""
-    return PredictColumn(column, sign=-1.0)
+    return fitted_predicting(X, column, sign=-1.0)
 
 
 def predict_column_spec(name: str, features: str, column: str, *, negated: bool = False) -> ModelSpec:

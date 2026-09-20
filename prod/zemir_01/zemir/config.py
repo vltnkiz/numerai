@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from zemir.neutralizer_ranking import MEDIUM_FEATURE_EXPOSURE_RANKING
-from zemir.strategy import BlendSpec, ModelSpec, Strategy
+from zemir.strategy import BlendSpec, ModelSpec, Neutralization, Strategy
 
 # Issue #31: the loop measurably beats a plain single fit (`num_iters=0`) on
 # mean_corr/sharpe/smart_sharpe, so it ships as-is. `random_state` pinned only
@@ -188,7 +188,7 @@ ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = MEDIUM_FEATURE_EXPOSURE_RANKING[:_NEUTR
 STRATEGIES: Mapping[str, Strategy] = {
     "linear": Strategy(
         models=(ModelSpec(name="linear", features="medium", trainer="ols"),),
-        blend=BlendSpec(proportion=0.95),
+        blend=BlendSpec(neutralization=Neutralization(0.95, "medium")),
     ),
     "era_boost": Strategy(
         models=(
@@ -199,7 +199,7 @@ STRATEGIES: Mapping[str, Strategy] = {
                 params=XGBOOST_HYPERPARAMS,
             ),
         ),
-        blend=BlendSpec(proportion=0.95),
+        blend=BlendSpec(neutralization=Neutralization(0.95, "medium")),
     ),
     "zemir_01": Strategy(
         models=(
@@ -213,8 +213,7 @@ STRATEGIES: Mapping[str, Strategy] = {
         ),
         blend=BlendSpec(
             weights=ENSEMBLE_MODEL_WEIGHTS,
-            neutralize=ENSEMBLE_NEUTRALIZERS,
-            proportion=0.95,
+            neutralization=Neutralization(0.95, ENSEMBLE_NEUTRALIZERS),
         ),
     ),
 }
@@ -223,71 +222,49 @@ STRATEGIES: Mapping[str, Strategy] = {
 PRODUCTION_STRATEGY = STRATEGIES["zemir_01"]
 
 
-@dataclass(frozen=True)
-class ScoringConfig:
-    """One row of the comparison table: what to score, downstream of a fit.
+def _neutralization(proportion: float, features: str | tuple[str, ...]) -> Neutralization | None:
+    """`proportion=0.0` is "no neutralization" in a sweep's vocabulary: no stage, no solve."""
+    return Neutralization(proportion, features) if proportion else None
 
-    Separate from `PipelineConfig` because it names a different stage. A
-    `PipelineConfig` describes a *fit* — an hour of training, recorded once in
-    the harness cache's `fit_config.json` and immutable thereafter. A
-    `ScoringConfig` describes what is done to those cached predictions, costs
-    seconds, and is swept many times against one fit.
 
-    Flat, like `PipelineConfig`: `proportion = 0.0` *is* "no neutralization"
-    (the correction term is exactly zero), so there is no separate on/off field.
+def _row(base: Strategy, models: tuple[str, ...], blend: BlendSpec) -> Strategy:
+    """`base`'s named models, as `base` specifies them, under a different blend.
+
+    Every sweep row below is a `Strategy` a harness cache can be rescored under
+    (`zemir.harness.score_configs`): the models come from the cache's own fit —
+    same `trainer`, `params` and `features`, and any per-model neutralization the
+    base carries — and only the blend varies. A row cannot vary what needs a refit.
     """
-
-    name: str
-    models: tuple[str, ...]
-    neutralization_proportion: float = 0.0
-    # Neutralize each model's raw prediction before the per-era rank-blend, rather
-    # than neutralizing the blended result. Linear regression's prediction lies
-    # exactly in the neutralizers' span (issue #24, established fact 1), so
-    # neutralizing it is a positive rescaling that `combine_predictions`'s rank
-    # transform is invariant to — this only changes non-linear models in `models`.
-    neutralize_before_blend: bool = False
-    # Parallel to `models`; None = equal weight (combine_predictions' default).
-    weights: tuple[float, ...] | None = None
-    # None = every training feature (today's default, per pipeline.py). A
-    # specific subset to project onto instead — issue #35.
-    neutralizers: tuple[str, ...] | None = None
+    by_name = {spec.name: spec for spec in base.models}
+    missing = [name for name in models if name not in by_name]
+    if missing:
+        raise KeyError(f"model(s) {missing} are not in the base strategy (have: {sorted(by_name)})")
+    return Strategy(models=tuple(by_name[name] for name in models), blend=blend)
 
 
 def scoring_sweep(
-    model_sets: tuple[tuple[str, ...], ...] = (
-        ("linear",),
-        ("era_boost",),
-        ("linear", "era_boost"),
-    ),
+    base: Strategy,
+    *,
+    features: str | tuple[str, ...],
+    model_sets: tuple[tuple[str, ...], ...] | None = None,
     proportions: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
-) -> list[ScoringConfig]:
-    """Every combination of models and neutralization proportion, named `<models>_p<prop>`."""
-    return [
-        ScoringConfig(f"{'+'.join(models)}_p{proportion:g}", models, proportion)
+) -> dict[str, Strategy]:
+    """Every combination of models and blend-neutralization proportion, named `<models>_p<prop>`.
+
+    `features` is what the blend is neutralized against — required, since a
+    `Neutralization` has no default set. `model_sets` defaults to each model of
+    `base` alone, then all of them together.
+    """
+    if model_sets is None:
+        names = tuple(spec.name for spec in base.models)
+        model_sets = tuple((name,) for name in names) + ((names,) if len(names) > 1 else ())
+    return {
+        f"{'+'.join(models)}_p{proportion:g}": _row(
+            base, models, BlendSpec(neutralization=_neutralization(proportion, features))
+        )
         for models in model_sets
         for proportion in proportions
-    ]
-
-
-def pre_blend_scoring_sweep(
-    proportions: tuple[float, ...] = (0.25, 0.5, 0.75, 1.0),
-) -> list[ScoringConfig]:
-    """Neutralize era_boost before blending with (untouched) linear, at each proportion.
-
-    Answers "neutralize XGBoost only, then blend" from issue #29: linear is
-    included in `models` for a correct rank-blend denominator, but pre-blend
-    neutralization is a no-op on it (see `ScoringConfig.neutralize_before_blend`),
-    so this measures the XGBoost-only-neutralized blend, not a three-way split.
-    """
-    return [
-        ScoringConfig(
-            f"linear+era_boost_pre_p{proportion:g}",
-            ("linear", "era_boost"),
-            proportion,
-            neutralize_before_blend=True,
-        )
-        for proportion in proportions
-    ]
+    }
 
 
 def _simplex_grid(n: int, resolution: int) -> list[tuple[float, ...]]:
@@ -312,11 +289,13 @@ def _simplex_grid(n: int, resolution: int) -> list[tuple[float, ...]]:
 
 
 def weight_sweep(
+    base: Strategy,
     models: tuple[str, ...],
     *,
+    features: str | tuple[str, ...],
     resolution: int = 10,
     neutralization_proportion: float = 0.95,
-) -> list[ScoringConfig]:
+) -> dict[str, Strategy]:
     """Every weighting of `models` on a resolution-`R` simplex grid, one proportion fixed.
 
     The reusable primitive behind "how much of each model belongs in the
@@ -324,52 +303,50 @@ def weight_sweep(
     composes with `scoring_sweep`'s job rather than duplicating it. Reused
     as-is whenever a model joins, leaves, or the fit changes.
     """
-    return [
-        ScoringConfig(
-            f"{'+'.join(models)}_w{'-'.join(f'{w:g}' for w in weights)}_p{neutralization_proportion:g}",
+    return {
+        f"{'+'.join(models)}_w{'-'.join(f'{w:g}' for w in weights)}_p{neutralization_proportion:g}": _row(
+            base,
             models,
-            neutralization_proportion,
-            weights=weights,
+            BlendSpec(
+                weights=dict(zip(models, weights)),
+                neutralization=_neutralization(neutralization_proportion, features),
+            ),
         )
         for weights in _simplex_grid(len(models), resolution)
-    ]
+    }
 
 
 def neutralizer_subset_sweep(
+    base: Strategy,
     ranked_features: list[str],
     ks: tuple[int, ...],
     *,
+    features: str | tuple[str, ...],
     models: tuple[str, ...] = ("linear", "era_boost"),
     weights: tuple[float, ...] | None = (0.3, 0.7),
     neutralization_proportion: float = 0.95,
-) -> list[ScoringConfig]:
-    """Compare full-feature neutralization against the top-K most-exposed features, by K.
+) -> dict[str, Strategy]:
+    """Compare neutralizing against `features` in full with the top-K most-exposed features, by K.
 
     `ranked_features` must already be sorted most- to least-exposed (see
-    `zemir.harness.rank_feature_exposure`) — this only slices it. The full set
-    (`neutralizers=None`, today's status quo) is always included as the
-    baseline row (issue #35).
+    `zemir.harness.rank_feature_exposure`) — this only slices it. The full-set
+    row (`features`, today's status quo) is always included as the baseline
+    row (issue #35).
     """
-    full = ScoringConfig(
-        f"{'+'.join(models)}_p{neutralization_proportion:g}_full",
-        models,
-        neutralization_proportion,
-        weights=weights,
-    )
-    subsets = [
-        ScoringConfig(
-            f"{'+'.join(models)}_p{neutralization_proportion:g}_top{k}",
+    prefix = f"{'+'.join(models)}_p{neutralization_proportion:g}"
+    weight_map = dict(zip(models, weights)) if weights is not None else None
+
+    def row(neutralizing_against: str | tuple[str, ...]) -> Strategy:
+        return _row(
+            base,
             models,
-            neutralization_proportion,
-            weights=weights,
-            neutralizers=tuple(ranked_features[:k]),
+            BlendSpec(
+                weights=weight_map,
+                neutralization=_neutralization(neutralization_proportion, neutralizing_against),
+            ),
         )
-        for k in ks
-    ]
-    return [full, *subsets]
 
-
-# Today's live submission — linear only, neutralized at 0.5. The row every later
-# comparison on this map is measured against; a member of `scoring_sweep()`, not
-# a duplicate of one.
-PRODUCTION_BASELINE = "linear_p0.5"
+    return {
+        f"{prefix}_full": row(features),
+        **{f"{prefix}_top{k}": row(tuple(ranked_features[:k])) for k in ks},
+    }

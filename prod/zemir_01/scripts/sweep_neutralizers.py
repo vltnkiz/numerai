@@ -23,6 +23,7 @@ from zemir.config import ENSEMBLE_MODEL_WEIGHTS, neutralizer_subset_sweep
 from zemir.harness import (
     HARNESS_DIR,
     PREDICTIONS_FILENAME,
+    load_fit_record,
     rank_feature_exposure,
     score_configs,
 )
@@ -59,10 +60,16 @@ def main() -> None:
     weights = tuple(ENSEMBLE_MODEL_WEIGHTS[m] for m in models)
 
     ranking = rank_feature_exposure(run_dir, models=models, weights=ENSEMBLE_MODEL_WEIGHTS)
-    configs = neutralizer_subset_sweep(
-        list(ranking.index), tuple(args.ks), models=models, weights=weights
+    record = load_fit_record(run_dir)
+    strategies = neutralizer_subset_sweep(
+        record.strategy,
+        list(ranking.index),
+        tuple(args.ks),
+        features=record.feature_set,
+        models=models,
+        weights=weights,
     )
-    result = score_configs(configs, run_dir=run_dir)
+    result = score_configs(strategies, run_dir=run_dir)
 
     ranked = result.summary.sort_values("payout", ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):

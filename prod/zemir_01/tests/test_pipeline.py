@@ -1,52 +1,18 @@
 import json
+from dataclasses import replace
 
 import pandas as pd
 import pytest
 
 from zemir.config import LIVE, MIN_VALIDATION_MEAN_CORR
-from zemir.pipeline import combine_predictions, run_pipeline
-from zemir.strategy import BlendSpec, Strategy
+from zemir.pipeline import run_pipeline
+from zemir.strategy import BlendSpec, Neutralization, Strategy
 
 from factories import FEATURE_SETS, SIGNAL_COLUMN, make_dataset, predict_column_spec
 
 
 def _strategy(*specs, blend=BlendSpec()):
     return Strategy(models=specs, blend=blend)
-
-
-def test_combine_predictions_returns_a_lone_model_untouched():
-    preds = pd.Series([0.1, 0.9, 0.3])
-    era = pd.Series(["0001", "0001", "0001"])
-
-    combined = combine_predictions({"linear": preds}, era)
-
-    pd.testing.assert_series_equal(combined, preds.rename("prediction"))
-
-
-def test_combine_predictions_blends_per_era_ranks_by_weight():
-    # One era, two models. A=[10,20,30,40] ranks to [.25,.5,.75,1.0]; B is A
-    # reversed and so ranks to [1.0,.75,.5,.25]. At weights 0.75/0.25 the
-    # blend is 0.75*A_rank + 0.25*B_rank.
-    era = pd.Series(["0001"] * 4)
-    a = pd.Series([10.0, 20.0, 30.0, 40.0])
-    b = pd.Series([40.0, 30.0, 20.0, 10.0])
-
-    combined = combine_predictions({"a": a, "b": b}, era, {"a": 0.75, "b": 0.25})
-
-    assert combined.tolist() == pytest.approx([0.4375, 0.5625, 0.6875, 0.8125])
-
-
-def test_combine_predictions_ranks_within_each_era_independently():
-    # Same relative pattern in both eras, but at very different magnitudes —
-    # a rank blend should produce the identical result in each, since it
-    # never compares magnitudes across eras.
-    era = pd.Series(["0001", "0001", "0002", "0002"])
-    a = pd.Series([1.0, 2.0, 100.0, 200.0])
-    b = pd.Series([2.0, 1.0, 200.0, 100.0])
-
-    combined = combine_predictions({"a": a, "b": b}, era)
-
-    assert combined.tolist() == pytest.approx([0.75, 0.75, 0.75, 0.75])
 
 
 def test_run_pipeline_exercises_the_post_fit_path_from_a_synthetic_dataset(tmp_path, fake_trainers):
@@ -127,3 +93,95 @@ def test_run_pipeline_fits_two_specs_at_different_widths_in_one_run(tmp_path, fa
     assert set(result.validation_scores) == {"narrow_model", "wide_model"}
     config = json.loads((result.run_dir / "config.json").read_text())
     assert config["model_features"] == {"narrow_model": "narrow", "wide_model": "medium"}
+
+
+def _two_models(m2_neutralization=None, blend_neutralization=None):
+    specs = (
+        predict_column_spec("m1", "medium", "feature_a"),
+        predict_column_spec("m2", "medium", "feature_c"),
+    )
+    if m2_neutralization is not None:
+        specs = (specs[0], replace(specs[1], neutralization=m2_neutralization))
+    return _strategy(*specs, blend=BlendSpec(neutralization=blend_neutralization))
+
+
+def _run(tmp_path, strategy, run_id):
+    return run_pipeline(
+        LIVE,
+        run_id=run_id,
+        strategy=strategy,
+        feature_sets=FEATURE_SETS,
+        dataset=make_dataset(),
+        runs_dir=tmp_path,
+    )
+
+
+def test_run_pipeline_neutralizes_one_model_before_the_blend(tmp_path, fake_trainers):
+    """`ModelSpec.neutralization` has a reader: the live artifact moves when it is set (#82's evidence, #88's fix)."""
+    plain = _run(tmp_path, _two_models(), "plain")
+    neutralized = _run(tmp_path, _two_models(m2_neutralization=Neutralization(1.0, "narrow")), "per-model")
+
+    assert not plain.live_predictions_neutralized.equals(neutralized.live_predictions_neutralized)
+
+
+def test_live_predictions_csv_is_the_raw_blend_whatever_is_neutralized(tmp_path, fake_trainers):
+    plain = _run(tmp_path, _two_models(), "plain")
+    neutralized = _run(
+        tmp_path,
+        _two_models(
+            m2_neutralization=Neutralization(1.0, "narrow"),
+            blend_neutralization=Neutralization(0.5, "medium"),
+        ),
+        "all-stages",
+    )
+
+    assert (plain.run_dir / "live_predictions.csv").read_bytes() == (
+        neutralized.run_dir / "live_predictions.csv"
+    ).read_bytes()
+
+
+def test_the_neutralized_artifact_keeps_the_column_name_it_has_always_had(tmp_path, fake_trainers):
+    result = _run(tmp_path, _two_models(blend_neutralization=Neutralization(0.5, "medium")), "named")
+
+    header = (result.run_dir / "live_predictions_neutralized.csv").read_text().splitlines()[0]
+    assert header == "id,prediction_neutralized"
+
+
+def test_config_json_records_the_blend_neutralization_in_the_keys_it_always_had(tmp_path, fake_trainers):
+    result = _run(tmp_path, _two_models(blend_neutralization=Neutralization(0.95, ("feature_a", "feature_b"))), "keys")
+
+    config = json.loads((result.run_dir / "config.json").read_text())
+    assert config["neutralization_proportion"] == 0.95
+    assert config["neutralizer_count"] == 2
+    assert "model_neutralization" not in config
+
+
+def test_config_json_records_a_per_model_neutralization_only_when_there_is_one(tmp_path, fake_trainers):
+    result = _run(tmp_path, _two_models(m2_neutralization=Neutralization(0.4, "narrow")), "recorded")
+
+    config = json.loads((result.run_dir / "config.json").read_text())
+    assert config["model_neutralization"] == {"m2": {"proportion": 0.4, "neutralizer_count": 1}}
+    assert config["neutralization_proportion"] == 0.0
+    assert config["neutralizer_count"] == 0
+
+
+def test_the_live_run_asks_for_exactly_one_strategy_through_the_shared_blend(
+    tmp_path, fake_trainers, monkeypatch
+):
+    """#88: live is the one-strategy case of the call the harness makes with a whole sweep."""
+    import zemir.blend as blend_module
+    import zemir.pipeline as pipeline_module
+
+    calls = []
+    real = blend_module.blend_strategies
+
+    def spy(strategies, *args, **kwargs):
+        calls.append(dict(strategies))
+        return real(strategies, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "blend_strategies", spy)
+    strategy = _two_models(blend_neutralization=Neutralization(0.5, "medium"))
+
+    _run(tmp_path, strategy, "shared")
+
+    assert calls == [{"live": strategy}]
