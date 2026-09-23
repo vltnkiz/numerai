@@ -9,13 +9,26 @@ from numerai_tools.scoring import correlation_contribution, numerai_corr
 from scipy.stats import spearmanr
 
 
-def era_corr(
+def era_spearman(
     df: pd.DataFrame,
     *,
     target_col: str = "target",
     prediction_col: str = "prediction",
     era_col: str = "era",
 ) -> pd.Series:
+    """Plain per-era Spearman correlation — *not* Numerai's paid CORR.
+
+    The paid measure is `era_numerai_corr`, and the two are not
+    interchangeable: on the same production run this reports 0.0164 against
+    the paid 0.0104, because it ranks differently *and* is taken on the raw
+    blend rather than the neutralized one.
+
+    Kept for exactly one reason: `score_log.jsonl` has recorded `mean_corr`,
+    `sharpe` and `smart_sharpe` in this vocabulary since issue #68, and
+    `RETENTION_DAYS = 365` keeps those entries comparable for a year after the
+    live run switches to the paid metrics. Nothing new should be measured on
+    it (issue #96).
+    """
     corrs = df.groupby(era_col).apply(
         lambda d: spearmanr(d[prediction_col], d[target_col])[0]
     )
@@ -28,32 +41,38 @@ def _autocorr_penalty(x: np.ndarray) -> float:
     return np.sqrt(1 + 2 * np.sum([((n - i) / n) * p**i for i in range(1, n)]))
 
 
-@dataclass
-class ValidationScore:
-    era_corr: pd.Series
+@dataclass(frozen=True)
+class EraSpearmanScore:
+    """The three legacy `score_log` columns, and the per-era series behind them.
+
+    Named for the correlation it holds, so it cannot be mistaken for a row of
+    `summarize_era_scores` — which reports `mean_corr`, `sharpe` and
+    `smart_sharpe` under the very same spellings, computed on the paid CORR.
+    Replaces `ValidationScore`, whose name said which *dataset* it covered and
+    never which *correlation* it held (issue #96).
+    """
+
+    era_spearman: pd.Series
     mean_corr: float
     std_corr: float
     sharpe: float
     smart_sharpe: float
 
 
-def score_validation(
-    df: pd.DataFrame,
-    *,
-    target_col: str = "target",
-    prediction_col: str = "prediction",
-    era_col: str = "era",
-) -> ValidationScore:
-    corrs = era_corr(
-        df, target_col=target_col, prediction_col=prediction_col, era_col=era_col
-    )
-    penalty = _autocorr_penalty(corrs.values.astype(float))
-    return ValidationScore(
-        era_corr=corrs,
+def summarize_era_spearman(corrs: pd.Series) -> EraSpearmanScore:
+    """Summarize a per-era Spearman series, arithmetic for arithmetic as `score_validation` did.
+
+    Shares `_smart_sharpe` with `summarize_era_scores`, which is what ends
+    `_autocorr_penalty` being computed down two separate paths. Verified
+    bit-identical to the retired inline form on both the synthetic fixture and
+    the real 655-era production series (issue #96).
+    """
+    return EraSpearmanScore(
+        era_spearman=corrs,
         mean_corr=float(corrs.mean()),
         std_corr=float(corrs.std()),
         sharpe=float(corrs.mean() / corrs.std()),
-        smart_sharpe=float(corrs.mean() / (corrs.std(ddof=1) * penalty)),
+        smart_sharpe=_smart_sharpe(corrs),
     )
 
 
@@ -87,11 +106,15 @@ def validate_predictions(predictions: pd.Series, era: pd.Series) -> None:
 # ---------------------------------------------------------------------------
 # Numerai's *paid* metrics.
 #
-# `score_validation` above uses plain Spearman, which is not what Numerai pays
+# `era_spearman` above uses plain Spearman, which is not what Numerai pays
 # on. Payout is `0.75 * corr20 + 2.25 * mmc20` — MMC carries three times the
 # weight of CORR — so a comparison made on Spearman alone can pick the wrong
 # architecture. These wrap `numerai-tools`, Numerai's own reference
 # implementation, rather than reimplementing the formulas.
+#
+# Everything below this line is the vocabulary the live run and the harness
+# share, composed by `score_predictions`. Everything above it survives only to
+# keep `score_log.jsonl`'s existing entries readable — see issue #96.
 #
 # All three are invariant to any strictly monotone transform of the
 # predictions, `rank_normalize` included: they rank internally. Verified
@@ -197,9 +220,9 @@ def _standardize(values: np.ndarray) -> np.ndarray:
 
 
 def summarize_era_scores(
-    era_corr: pd.DataFrame,
-    era_mmc: pd.DataFrame,
-    era_max_feature_corr: pd.DataFrame,
+    corr_by_era: pd.DataFrame,
+    mmc_by_era: pd.DataFrame,
+    exposure_by_era: pd.DataFrame,
 ) -> pd.DataFrame:
     """One row per prediction column — the comparison table.
 
@@ -207,21 +230,30 @@ def summarize_era_scores(
     meta-model window so both halves are measured over the same eras. `mean_corr`
     over the full validation span is reported alongside, and the two are not
     interchangeable.
+
+    `mean_corr`, `sharpe` and `smart_sharpe` here are computed on Numerai's
+    **paid** CORR. `score_log.jsonl` records three columns of those same names
+    taken from `summarize_era_spearman`; they are different quantities, and
+    live under separate keys for exactly that reason (issue #96).
+
+    Parameters are named for the shape they carry rather than the functions
+    that produce them, which is what stops them shadowing `era_numerai_corr`,
+    `era_mmc` and `era_max_feature_corr` inside this body.
     """
-    window = era_corr.loc[era_mmc.index]
+    window = corr_by_era.loc[mmc_by_era.index]
     summary = pd.DataFrame(
         {
-            "eras": len(era_corr),
-            "mean_corr": era_corr.mean(),
-            "std_corr": era_corr.std(),
-            "sharpe": era_corr.mean() / era_corr.std(),
-            "smart_sharpe": era_corr.apply(_smart_sharpe),
-            "mmc_eras": len(era_mmc),
+            "eras": len(corr_by_era),
+            "mean_corr": corr_by_era.mean(),
+            "std_corr": corr_by_era.std(),
+            "sharpe": corr_by_era.mean() / corr_by_era.std(),
+            "smart_sharpe": corr_by_era.apply(_smart_sharpe),
+            "mmc_eras": len(mmc_by_era),
             "mean_corr_window": window.mean(),
-            "mean_mmc": era_mmc.mean(),
-            "std_mmc": era_mmc.std(),
-            "mmc_sharpe": era_mmc.mean() / era_mmc.std(),
-            "max_feature_corr": era_max_feature_corr.mean(),
+            "mean_mmc": mmc_by_era.mean(),
+            "std_mmc": mmc_by_era.std(),
+            "mmc_sharpe": mmc_by_era.mean() / mmc_by_era.std(),
+            "max_feature_corr": exposure_by_era.mean(),
         }
     )
     summary["payout"] = (
@@ -235,3 +267,59 @@ def summarize_era_scores(
 def _smart_sharpe(corrs: pd.Series) -> float:
     values = corrs.to_numpy(dtype=float)
     return float(values.mean() / (values.std(ddof=1) * _autocorr_penalty(values)))
+
+
+@dataclass(frozen=True)
+class PredictionScores:
+    """Everything one set of prediction columns scores, in the paid vocabulary.
+
+    The four artifacts `score_configs` has always produced, minus the `run_dir`
+    it used to echo back: the caller already holds that, and dropping it is
+    what lets the live run receive this same type without inventing a
+    directory it has no use for.
+    """
+
+    summary: pd.DataFrame
+    corr_by_era: pd.DataFrame
+    mmc_by_era: pd.DataFrame
+    exposure_by_era: pd.DataFrame
+
+
+def score_predictions(
+    predictions: pd.DataFrame,
+    target: pd.Series,
+    era: pd.Series,
+    *,
+    meta_model: pd.Series,
+    features: pd.DataFrame,
+) -> PredictionScores:
+    """Score prediction columns on Numerai's paid metrics — the one composition both paths call.
+
+    The live run and the harness measure the same quantities through this
+    function, which is what makes a live run's numbers comparable to a harness
+    table at all (issue #93). `score_configs` hands it columns blended from a
+    cache; the live run hands it its own validation blend. Neither concept
+    appears here: this takes frames and returns numbers.
+
+    Pure by design — it writes nothing. Artifact layout stays the caller's,
+    so the harness keeps its `scores.csv`/`era_*.csv` set and the live run is
+    free to record something else without this function growing a second shape.
+
+    `predictions`, `target`, `era` and `features` share one index.
+    `rank_normalize` is deliberately not applied: all three measures rank
+    internally, so it is provably free (issue #26).
+
+    The live path needs `numerai_corr` *before* it submits and the rest only
+    after, so it calls `era_numerai_corr` directly for the gate and this
+    afterwards for the record — recomputing CORR for 22 s on the far side of
+    the submission rather than handing this function a half-filled table.
+    """
+    corr_by_era = era_numerai_corr(predictions, target, era)
+    mmc_by_era = era_mmc(predictions, target, era, meta_model)
+    exposure_by_era = era_max_feature_corr(predictions, features, era)
+    return PredictionScores(
+        summary=summarize_era_scores(corr_by_era, mmc_by_era, exposure_by_era),
+        corr_by_era=corr_by_era,
+        mmc_by_era=mmc_by_era,
+        exposure_by_era=exposure_by_era,
+    )

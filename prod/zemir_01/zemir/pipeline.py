@@ -17,9 +17,10 @@ from zemir.data import Dataset, scoring_window
 from zemir.fitting import fit_strategy
 from zemir.models import FittedModel
 from zemir.scoring import (
-    ValidationScore,
+    EraSpearmanScore,
+    era_spearman,
     rank_normalize,
-    score_validation,
+    summarize_era_spearman,
     validate_predictions,
 )
 from zemir.strategy import FeatureSets, Strategy, neutralizer_columns
@@ -45,10 +46,19 @@ class SubmissionResult:
 
 @dataclass
 class PipelineResult:
+    """What one live run produced.
+
+    The two score fields hold **Spearman** on the raw blend, which is what
+    `score_log.jsonl` has recorded since issue #68 and what the submission gate
+    still reads. Issue #97 moves the gate to Numerai's paid CORR on the
+    neutralized blend; until then these are the same numbers this pipeline has
+    always produced, under a type that finally says which correlation it holds.
+    """
+
     run_id: str
     run_dir: Path
-    validation_scores: dict[str, ValidationScore]
-    combined_validation_score: ValidationScore
+    validation_scores: dict[str, EraSpearmanScore]
+    combined_validation_score: EraSpearmanScore
     live_predictions: pd.Series
     live_predictions_neutralized: pd.Series
 
@@ -174,8 +184,8 @@ def run_pipeline(
     validation_df = scoring_window(dataset.validation, config.max_eras)
     validation_predictions = predict_each(fitted_models, validation_df)
     validation_scores = {
-        name: score_validation(
-            validation_df[["era", "target"]].assign(prediction=preds),
+        name: summarize_era_spearman(
+            era_spearman(validation_df[["era", "target"]].assign(prediction=preds))
         )
         for name, preds in validation_predictions.items()
     }
@@ -185,8 +195,10 @@ def run_pipeline(
     combined_validation_predictions = combine_predictions(
         validation_predictions, validation_df["era"], blend.weights
     )
-    combined_validation_score = score_validation(
-        validation_df[["era", "target"]].assign(prediction=combined_validation_predictions)
+    combined_validation_score = summarize_era_spearman(
+        era_spearman(
+            validation_df[["era", "target"]].assign(prediction=combined_validation_predictions)
+        )
     )
     _write_score(run_dir, combined_validation_score, prefix="")
 
@@ -259,7 +271,14 @@ def _write_run_config(
     (run_dir / "config.json").write_text(json.dumps(record, indent=2, sort_keys=True))
 
 
-def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
+def _write_score(run_dir: Path, score: EraSpearmanScore, *, prefix: str) -> None:
+    """Write one model's Spearman score artifacts.
+
+    Filenames and JSON keys are the ones every run since issue #68 has
+    written, deliberately unchanged: the `mean_corr` here is Spearman, and a
+    rename now would break continuity with run directories on disk without
+    making anything clearer than `EraSpearmanScore` already does.
+    """
     (run_dir / f"{prefix}validation_score.json").write_text(
         json.dumps(
             {
@@ -271,7 +290,7 @@ def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
             indent=2,
         )
     )
-    score.era_corr.to_csv(run_dir / f"{prefix}validation_era_corr.csv", header=["corr"])
+    score.era_spearman.to_csv(run_dir / f"{prefix}validation_era_corr.csv", header=["corr"])
 
 
 def _run_id_age_days(run_id: str, *, now: datetime) -> float | None:
@@ -287,8 +306,8 @@ def append_score_log(
     *,
     run_id: str,
     target_column: str,
-    validation_scores: Mapping[str, ValidationScore],
-    combined_validation_score: ValidationScore,
+    validation_scores: Mapping[str, EraSpearmanScore],
+    combined_validation_score: EraSpearmanScore,
     submission_id: str | None,
     log_path: Path = SCORE_LOG_PATH,
     now: datetime | None = None,
@@ -303,7 +322,7 @@ def append_score_log(
     than growing without bound.
     """
 
-    def _score_dict(score: ValidationScore) -> dict[str, float]:
+    def _score_dict(score: EraSpearmanScore) -> dict[str, float]:
         return {
             "mean_corr": score.mean_corr,
             "sharpe": score.sharpe,
