@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,14 +181,35 @@ def load_validation_features(
     return frame
 
 
-def load_meta_model(version: str, *, napi: NumerAPI | None = None) -> pd.Series:
+def load_meta_model(
+    version: str, *, napi: NumerAPI | None = None, refresh: bool = False
+) -> pd.Series:
     """Numerai's stake-weighted crowd prediction — the reference MMC is measured against.
 
     Covers a *window* of validation eras, not all of them (96 eras in v5.0), so
-    anything scored against it is restricted to that window.
+    anything scored against it is restricted to that window. Numerai appends an
+    era a week and never revises one, so a stale copy is a shorter window, never
+    wrong numbers.
+
+    `refresh` re-downloads the shared on-disk copy. Only the live run sets it,
+    after submitting; the harness reads whatever is on disk, so the daily run is
+    what keeps both paths on the same window (issue #101). A failed refresh falls
+    back to the cached copy with a warning rather than losing MMC for the run;
+    numerapi writes to a `.temp` file and swaps it in, so a failure mid-download
+    leaves that copy intact.
     """
     napi = napi or NumerAPI()
-    path = _download_file(napi, version, "meta_model.parquet", force=False)
+    try:
+        path = _download_file(napi, version, "meta_model.parquet", force=refresh)
+    except Exception as exc:
+        path = DATASETS_DIR / version / "meta_model.parquet"
+        if not path.exists():
+            raise
+        warnings.warn(
+            f"meta_model.parquet refresh failed ({exc!r}); scoring against the stale cached copy",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     frame = pd.read_parquet(path, columns=["numerai_meta_model"])
     return frame["numerai_meta_model"].dropna()
 
