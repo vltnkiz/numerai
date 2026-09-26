@@ -299,9 +299,17 @@ cd prod/zemir_01
 ## Data
 
 Datasets are cached in the repo at `datasets/<version>/` (gitignored, ~6 GB for
-v5.0). `train.parquet` and `validation.parquet` are downloaded once and reused;
-`live.parquet` is re-downloaded every run, because a new round replaces the
-previous round's features under the same filename. `meta_model.parquet` (15 MB)
+v5.0). `train.parquet` is downloaded once and reused. `live.parquet` is
+re-downloaded every run, because a new round replaces the previous round's
+features under the same filename. `validation.parquet` (5.6 GB) is refreshed by
+the live run as its very last step, after the upload and the score log, when the
+on-disk copy is more than 7 days old: Numerai resolves about one validation era
+a week, so the gate's frame (`eras`) grows with it. The new copy is staged and
+checked before it replaces the old one, since the next run reads it before
+uploading; a failed refresh only warns. The fit never reads validation, so a
+refresh cannot change what gets submitted. Numbers are only comparable at the
+same `eras`: to compare against an older harness cache, refit it on the current
+copy. `meta_model.parquet` (15 MB)
 is the crowd prediction MMC is measured against and is only read by the harness.
 
 Credentials live in `prod/zemir_01/.env` (see `.env.example`) and are read only

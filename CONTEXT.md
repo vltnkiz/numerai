@@ -29,7 +29,7 @@ The three numbers Numerai pays on, and the vocabulary the harness ranks strategi
 _Avoid_: "score" or "validation score" for any one of them. Say which metric.
 
 **Meta-model window**:
-The validation eras for which Numerai has published its meta model's predictions: the only eras over which MMC, and therefore payout, can be measured. Shorter than validation, and it grows by about one era a week as the shared copy is refreshed, but it never rewrites an era already in it (see [issue #94](https://github.com/vltnkiz/numerai/issues/94) and [issue #101](https://github.com/vltnkiz/numerai/issues/101)). Numerai CORR over all of validation does not depend on it.
+The validation eras for which Numerai has published its meta model's predictions: the only eras over which MMC, and therefore payout, can be measured. Shorter than validation, and it grows by about one era a week as the shared copy is refreshed, but it never rewrites an era already in it (see [issue #94](https://github.com/vltnkiz/numerai/issues/94) and [issue #101](https://github.com/vltnkiz/numerai/issues/101)). Numerai CORR over all of validation does not depend on it, but validation itself grows too (the live run refreshes it weekly), so CORR is only comparable at the same `eras`.
 _Avoid_: comparing MMC or payout between two measurements taken over different windows. A longer window is not a better score, only a different one; check `mmc_eras` first.
 
 **Strategy**:

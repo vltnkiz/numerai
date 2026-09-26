@@ -33,7 +33,7 @@ from zemir.config import (
     PRODUCTION_STRATEGY,
     SUBMISSION_MODEL_SLOT,
 )
-from zemir.data import download, load_meta_model, resolve_feature_sets
+from zemir.data import download, load_meta_model, refresh_validation, resolve_feature_sets
 from zemir.pipeline import (
     append_score_log,
     feature_set_names,
@@ -180,20 +180,28 @@ def main() -> int:
         scores=scores,
         submission_id=submission.submission_id if submission else None,
     )
+    exit_code = 0
     if below_gate:
         # Deterministic fit on unchanged data: a retry would fail identically.
         record_round_outcome(live_round.number, GATE_FAILED, run_id=result.run_id)
         print("not submitting: below the gate")
-        return EXIT_GATE_FAILED
-    if round_changed:
+        exit_code = EXIT_GATE_FAILED
+    elif round_changed:
         print(
             f"round {live_round.number} is no longer current — not submitting its "
             "predictions into the next round"
         )
-        return EXIT_ROUND_CHANGED
-    if scores is None:
-        return EXIT_POST_SUBMISSION_SCORING_FAILED
-    return 0
+        exit_code = EXIT_ROUND_CHANGED
+    elif scores is None:
+        exit_code = EXIT_POST_SUBMISSION_SCORING_FAILED
+
+    # Last, after every outcome is recorded, and never on a round change: the
+    # wrapper reruns straight away for the new round, and a 5.6 GB download
+    # would sit in front of that upload. Keeps the next run's gate frame
+    # current; a failure only warns.
+    if not round_changed:
+        refresh_validation(config.data_version)
+    return exit_code
 
 
 if __name__ == "__main__":
