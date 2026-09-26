@@ -15,6 +15,11 @@ research/example-scripts/
 *.feather
 *.joblib
 
+# Exception: small recorded production series used as test goldens (issue #96).
+# Run directories stay ignored; these are copies, committed so CI can replay
+# real numbers instead of only synthetic ones.
+!prod/zemir_01/tests/data/*.csv
+
 # Python (the live run's venv lives at the repo root, issue #69)
 .venv/
 __pycache__/

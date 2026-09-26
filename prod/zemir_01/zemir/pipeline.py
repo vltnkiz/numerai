@@ -17,12 +17,16 @@ from zemir.data import Dataset, scoring_window
 from zemir.fitting import fit_strategy
 from zemir.models import FittedModel
 from zemir.scoring import (
-    ValidationScore,
+    EraSpearmanScore,
+    PredictionScores,
+    era_numerai_corr,
+    era_spearman,
     rank_normalize,
-    score_validation,
+    score_predictions,
+    summarize_era_spearman,
     validate_predictions,
 )
-from zemir.strategy import FeatureSets, Strategy, neutralizer_columns
+from zemir.strategy import FeatureSets, Strategy, neutralizer_columns, required_columns
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNS_DIR = REPO_ROOT / "prod" / "zemir_01" / "runs"
@@ -33,7 +37,19 @@ SCORE_LOG_PATH = REPO_ROOT / "prod" / "zemir_01" / "score_log.jsonl"
 # the machine running the live job has hundreds of GB free, so pruning them
 # isn't worth the code.
 RETENTION_DAYS = 365
+# Issue #98: the history log's entry shape. Schema 1 (#68) carries no marker.
+SCORE_LOG_SCHEMA = 2
+# The paid row's two counts, recorded as integers rather than floats.
+_INTEGER_SCORE_COLUMNS = {"eras", "mmc_eras"}
 _RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
+
+# The two blends a live run scores, as columns beside each model's (issue #97).
+# `combined` is the raw blend, never submitted, under the name schema 1 of the
+# history log used for it (schema 2 says `raw_blend`, issue #98);
+# `combined_neutralized` is the submitted blend, the one the gate reads and the
+# one a harness row measures. See CONTEXT.md.
+RAW_BLEND = "combined"
+SUBMITTED_BLEND = "combined_neutralized"
 
 
 @dataclass
@@ -45,12 +61,40 @@ class SubmissionResult:
 
 @dataclass
 class PipelineResult:
+    """What one live run produced, up to the gate and no further.
+
+    Carries the gate's one number and the predictions everything recorded-only
+    is scored from, but no other score: scoring that nothing waits on runs
+    after the submission (`score_run`), so its cost can never delay or break
+    one (issue #97).
+
+    `validation_predictions` holds one column per model plus `RAW_BLEND` and
+    `SUBMITTED_BLEND`, on `validation`'s index. `gate_corr` is the submitted
+    blend's mean **Numerai CORR** over the whole of `validation`.
+    """
+
     run_id: str
     run_dir: Path
-    validation_scores: dict[str, ValidationScore]
-    combined_validation_score: ValidationScore
+    validation: pd.DataFrame
+    validation_predictions: pd.DataFrame
+    gate_corr: float
     live_predictions: pd.Series
     live_predictions_neutralized: pd.Series
+
+
+@dataclass(frozen=True)
+class RunScores:
+    """Everything recorded about a run after its submission.
+
+    `paid` is `score_predictions`' table over every column of
+    `PipelineResult.validation_predictions`: the composition, and the files, a
+    harness scoring run produces. `spearman` holds the legacy **Spearman
+    correlation** triple for each model and the raw blend, kept only so the
+    history log's older entries stay comparable (issue #96).
+    """
+
+    paid: PredictionScores
+    spearman: dict[str, EraSpearmanScore]
 
 
 def _load_numerai_models(env: dict[str, str] | None = None) -> dict[str, str]:
@@ -126,6 +170,24 @@ def predict_each(
     }
 
 
+def feature_set_names(config: PipelineConfig, strategy: Strategy) -> list[str]:
+    """Every feature set a live run resolves: its scoring universe, and the strategy's own."""
+    return list(dict.fromkeys([config.feature_set, *strategy.feature_set_names]))
+
+
+def run_columns(config: PipelineConfig, strategy: Strategy, feature_sets: FeatureSets) -> list[str]:
+    """What a live run loads: what the strategy needs, plus the run's scoring universe.
+
+    `config.feature_set` is the universe feature exposure is measured against,
+    exactly as the harness measures it against its cache's `feature_set`
+    (CONTEXT.md, "Feature set"). A strategy that already loads all of it (as
+    production does) loads the same columns as before.
+    """
+    return list(
+        dict.fromkeys([*required_columns(strategy, feature_sets), *feature_sets[config.feature_set]])
+    )
+
+
 def run_pipeline(
     config: PipelineConfig,
     *,
@@ -153,9 +215,14 @@ def run_pipeline(
     `live_predictions.csv` is the raw blend, before any neutralization at all;
     `live_predictions_neutralized.csv` is what `zemir.blend` returns, ranked.
 
+    The submitted blend is also built on validation, from `float32` model
+    predictions and cast to `float32` after, exactly as `zemir.harness` builds
+    it from its cache, so its row is the harness's row to the digit.
+    `gate_corr` is its mean Numerai CORR. Nothing else is scored here.
+
     Never submits and never gates: submission is a separate step
-    (`submit_predictions`), and the validation-score gate that guards it lives
-    with it in scripts/run_pipeline.py.
+    (`submit_predictions`), and the gate that guards it (`record_gate`) is
+    called beside it in scripts/run_pipeline.py.
     """
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -172,23 +239,25 @@ def run_pipeline(
     )
     fitted_models = fit.models
     validation_df = scoring_window(dataset.validation, config.max_eras)
-    validation_predictions = predict_each(fitted_models, validation_df)
-    validation_scores = {
-        name: score_validation(
-            validation_df[["era", "target"]].assign(prediction=preds),
-        )
-        for name, preds in validation_predictions.items()
-    }
-    for name, score in validation_scores.items():
-        _write_score(run_dir, score, prefix=f"{name}_")
-
-    combined_validation_predictions = combine_predictions(
-        validation_predictions, validation_df["era"], blend.weights
+    validation_by_model = predict_each(fitted_models, validation_df)
+    validation_predictions = pd.DataFrame(validation_by_model)
+    validation_predictions[RAW_BLEND] = combine_predictions(
+        validation_by_model, validation_df["era"], blend.weights
     )
-    combined_validation_score = score_validation(
-        validation_df[["era", "target"]].assign(prediction=combined_validation_predictions)
+    validation_predictions[SUBMITTED_BLEND] = blend_strategies(
+        {"live": strategy},
+        pd.DataFrame(validation_by_model).astype("float32"),
+        validation_df,
+        validation_df["era"],
+        feature_sets,
+    )["live"].astype("float32")
+    gate_corr = float(
+        era_numerai_corr(
+            validation_predictions[[SUBMITTED_BLEND]],
+            validation_df["target"],
+            validation_df["era"],
+        )[SUBMITTED_BLEND].mean()
     )
-    _write_score(run_dir, combined_validation_score, prefix="")
 
     live_predictions_by_model = predict_each(fitted_models, dataset.live)
     live_predictions = combine_predictions(
@@ -213,10 +282,115 @@ def run_pipeline(
     return PipelineResult(
         run_id=run_id,
         run_dir=run_dir,
-        validation_scores=validation_scores,
-        combined_validation_score=combined_validation_score,
+        validation=validation_df,
+        validation_predictions=validation_predictions,
+        gate_corr=gate_corr,
         live_predictions=live_predictions,
         live_predictions_neutralized=live_predictions_neutralized,
+    )
+
+
+def record_gate(result: PipelineResult, *, threshold: float) -> dict:
+    """The gate's record, written to `gate.json` before any upload, and returned.
+
+    `passed` is exactly `gate_corr >= threshold`. Written first, so the gate's
+    evidence survives whatever happens after it: a failed upload, or a failed
+    post-submission score. The same record becomes the history log entry's
+    `gate` (issue #98), so the two never describe the gate in different shapes.
+    """
+    record = {
+        "metric": "numerai_corr",
+        "artifact": SUBMITTED_BLEND,
+        "eras": int(result.validation["era"].nunique()),
+        "mean_corr": result.gate_corr,
+        "threshold": threshold,
+        "passed": not result.gate_corr < threshold,
+    }
+    (result.run_dir / "gate.json").write_text(json.dumps(record, indent=2))
+    return record
+
+
+def score_run(
+    result: PipelineResult,
+    *,
+    meta_model: pd.Series,
+    scoring_universe: list[str],
+) -> RunScores:
+    """Score every validation column and write the artifacts. Runs after the submission.
+
+    The paid table goes through `score_predictions` over a `float32` frame:
+    the harness's composition, dtype and filenames, so a live run directory's
+    scores read like a harness cache's. The Spearman triple is taken on the
+    unconverted predictions, the inputs it has always had, so the history log's
+    Spearman series runs unbroken across its schema 1 and schema 2 entries.
+    `scoring_universe` is what exposure is measured against: the run's
+    `feature_set`, never a strategy's own columns.
+    """
+    validation = result.validation
+    predictions = result.validation_predictions
+    paid = score_predictions(
+        predictions.astype("float32"),
+        validation["target"],
+        validation["era"],
+        meta_model=meta_model,
+        features=validation[scoring_universe],
+    )
+    spearman = {
+        name: summarize_era_spearman(
+            era_spearman(validation[["era", "target"]].assign(prediction=predictions[name]))
+        )
+        for name in predictions.columns
+        if name != SUBMITTED_BLEND
+    }
+
+    run_dir = result.run_dir
+    # The harness's filenames (`zemir.harness.score_configs`), column for column.
+    paid.summary.to_csv(run_dir / "scores.csv")
+    paid.corr_by_era.to_csv(run_dir / "era_corr.csv")
+    paid.mmc_by_era.to_csv(run_dir / "era_mmc.csv")
+    paid.exposure_by_era.to_csv(run_dir / "era_max_feature_corr.csv")
+    pd.DataFrame(
+        {
+            name: {
+                "mean_corr": score.mean_corr,
+                "std_corr": score.std_corr,
+                "sharpe": score.sharpe,
+                "smart_sharpe": score.smart_sharpe,
+            }
+            for name, score in spearman.items()
+        }
+    ).T.rename_axis("config").to_csv(run_dir / "spearman_scores.csv")
+    pd.DataFrame({name: score.era_spearman for name, score in spearman.items()}).rename_axis(
+        "era"
+    ).to_csv(run_dir / "era_spearman.csv")
+    return RunScores(paid=paid, spearman=spearman)
+
+
+# The paid columns a run prints. `mmc_eras` rides beside MMC and payout on
+# purpose: both are only comparable between runs scored over the same
+# meta-model window, and that window grows about one era a week (issue #101).
+_PRINTED_COLUMNS = ["eras", "mean_corr", "sharpe", "mmc_eras", "mean_mmc", "payout", "max_feature_corr"]
+
+
+def format_gate(result: PipelineResult, *, threshold: float) -> str:
+    """The gate's one line: which number, on which artifact, against which floor."""
+    verdict = "pass" if not result.gate_corr < threshold else "FAIL"
+    return (
+        f"gate: numerai_corr({SUBMITTED_BLEND}) = {result.gate_corr:.6f}, "
+        f"floor MIN_VALIDATION_MEAN_CORR = {threshold:.4f}: {verdict}"
+    )
+
+
+def format_run_scores(scores: RunScores) -> str:
+    """The paid table, then the raw blend's legacy Spearman line, labelled as legacy."""
+    legacy = scores.spearman[RAW_BLEND]
+    return "\n".join(
+        [
+            "validation, Numerai CORR / MMC (the harness's vocabulary):",
+            scores.paid.summary[_PRINTED_COLUMNS].to_string(float_format=lambda v: f"{v:.6f}"),
+            f"legacy Spearman, {RAW_BLEND}: mean_corr={legacy.mean_corr:.4f}  "
+            f"sharpe={legacy.sharpe:.4f}  smart_sharpe={legacy.smart_sharpe:.4f}",
+        ]
     )
 
 
@@ -259,21 +433,6 @@ def _write_run_config(
     (run_dir / "config.json").write_text(json.dumps(record, indent=2, sort_keys=True))
 
 
-def _write_score(run_dir: Path, score: ValidationScore, *, prefix: str) -> None:
-    (run_dir / f"{prefix}validation_score.json").write_text(
-        json.dumps(
-            {
-                "mean_corr": score.mean_corr,
-                "std_corr": score.std_corr,
-                "sharpe": score.sharpe,
-                "smart_sharpe": score.smart_sharpe,
-            },
-            indent=2,
-        )
-    )
-    score.era_corr.to_csv(run_dir / f"{prefix}validation_era_corr.csv", header=["corr"])
-
-
 def _run_id_age_days(run_id: str, *, now: datetime) -> float | None:
     """Days between `run_id`'s timestamp and `now`, or None if `run_id` isn't one."""
     try:
@@ -287,28 +446,42 @@ def append_score_log(
     *,
     run_id: str,
     target_column: str,
-    validation_scores: Mapping[str, ValidationScore],
-    combined_validation_score: ValidationScore,
+    gate: Mapping[str, object],
+    scores: RunScores | None,
     submission_id: str | None,
     log_path: Path = SCORE_LOG_PATH,
     now: datetime | None = None,
 ) -> None:
-    """Append one live run's scores to the cross-run history log.
+    """Append one live run's `SCORE_LOG_SCHEMA` entry to the cross-run history log.
 
     Called for every scripts/run_pipeline.py invocation regardless of the
-    validation-score gate, so a run that fails the gate still leaves a trace —
-    the gate only catches a run crashing through the floor, not one quietly
-    declining above it (issue #68). Prunes entries older than
-    `RETENTION_DAYS` on each append, so the file stays small forever rather
-    than growing without bound.
+    gate, so a run that fails the gate still leaves a trace — the gate only
+    catches a run crashing through the floor, not one quietly declining above
+    it (issue #68). Prunes entries older than `RETENTION_DAYS` on each append,
+    so the file stays small forever rather than growing without bound. The
+    prune reads nothing but `run_id`, so it spans every schema.
+
+    `gate` is `record_gate`'s record, known before the upload. `scores` is
+    `score_run`'s; `None` means post-submission scoring failed, and the entry
+    is still written with its three artifacts `null`, so neither the run nor
+    its submission ever goes missing from the log (issue #97).
+
+    Schema 2 (issue #98) nests by artifact — `models`, `raw_blend`,
+    `submitted_blend` — and within each by vocabulary: `paid` is the
+    artifact's full harness row, `mmc_eras` included, so MMC and payout carry
+    their window; `spearman` is the legacy triple, present only where schema 1
+    recorded one. An entry with no `schema` key is schema 1:
+    `{run_id, target_column, models, combined, submission_id}`, Spearman only,
+    `combined` being the raw blend. Those are left exactly as written.
     """
 
-    def _score_dict(score: ValidationScore) -> dict[str, float]:
-        return {
-            "mean_corr": score.mean_corr,
-            "sharpe": score.sharpe,
-            "smart_sharpe": score.smart_sharpe,
-        }
+    def _paid(name: str) -> dict[str, float | int]:
+        row = scores.paid.summary.loc[name]
+        return {k: int(v) if k in _INTEGER_SCORE_COLUMNS else float(v) for k, v in row.items()}
+
+    def _spearman(name: str) -> dict[str, float]:
+        s = scores.spearman[name]
+        return {"mean_corr": s.mean_corr, "sharpe": s.sharpe, "smart_sharpe": s.smart_sharpe}
 
     now = now or datetime.now(timezone.utc)
     entries = []
@@ -319,12 +492,22 @@ def append_score_log(
         for e in entries
         if (age := _run_id_age_days(e["run_id"], now=now)) is not None and age <= RETENTION_DAYS
     ]
+    models = [name for name in scores.spearman if name != RAW_BLEND] if scores else []
     entries.append(
         {
+            "schema": SCORE_LOG_SCHEMA,
             "run_id": run_id,
             "target_column": target_column,
-            "models": {name: _score_dict(s) for name, s in validation_scores.items()},
-            "combined": _score_dict(combined_validation_score),
+            "gate": dict(gate),
+            "models": (
+                {name: {"paid": _paid(name), "spearman": _spearman(name)} for name in models}
+                if scores
+                else None
+            ),
+            "raw_blend": (
+                {"paid": _paid(RAW_BLEND), "spearman": _spearman(RAW_BLEND)} if scores else None
+            ),
+            "submitted_blend": {"paid": _paid(SUBMITTED_BLEND)} if scores else None,
             "submission_id": submission_id,
         }
     )

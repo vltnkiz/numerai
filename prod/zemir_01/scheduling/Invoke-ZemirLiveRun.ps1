@@ -46,6 +46,7 @@ $pipelineFailures = @{
     3 = 'round did not open'
     4 = 'not enough available memory'
     5 = 'round changed during the run'
+    6 = 'submitted, but scoring after the submission failed'
 }
 
 function Write-Log([string]$message) {

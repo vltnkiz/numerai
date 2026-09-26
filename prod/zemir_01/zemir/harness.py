@@ -42,11 +42,9 @@ from zemir.fitting import fit_strategy
 from zemir.models import FittedModel
 from zemir.pipeline import RUNS_DIR, predict_each
 from zemir.scoring import (
+    PredictionScores,
     era_feature_corr,
-    era_max_feature_corr,
-    era_mmc,
-    era_numerai_corr,
-    summarize_era_scores,
+    score_predictions,
 )
 from zemir.strategy import (
     BlendSpec,
@@ -193,15 +191,6 @@ def explain_models(run_dir: Path) -> dict[str, pd.DataFrame]:
         else:
             ranked[name] = explanation.sort_values("coef", key=abs, ascending=False, kind="stable")
     return ranked
-
-
-@dataclass
-class ScoreResult:
-    run_dir: Path
-    summary: pd.DataFrame
-    era_corr: pd.DataFrame
-    era_mmc: pd.DataFrame
-    era_max_feature_corr: pd.DataFrame
 
 
 @dataclass(frozen=True)
@@ -384,15 +373,16 @@ def score_configs(
     strategies: Mapping[str, Strategy],
     *,
     run_dir: Path,
-) -> ScoreResult:
+) -> PredictionScores:
     """Score every strategy against one cached fit, on Numerai's paid metrics.
 
     The cheap stage: hands the cache's raw per-model predictions to
     `zemir.blend.blend_strategies` — the very transform the live run applies to
-    the single live era — and scores the result. `rank_normalize` is
-    deliberately *not* applied: it is a strictly monotone transform, and CORR,
-    MMC and the exposure measure here all rank internally, so it is provably
-    free (issue #26).
+    the single live era — and scores the result through
+    `zemir.scoring.score_predictions`, the one composition the live run also
+    calls (issue #96). What is left here is cache work: loading it, checking
+    each strategy against the fit that produced it, and writing the artifacts
+    out. The measuring itself is no longer the harness's to own.
 
     Each row is a `Strategy`, and must be one this cache can be scored under
     (`check_scoreable`): the models are the cache's, so only the blend and the
@@ -421,15 +411,20 @@ def score_configs(
         "float32"
     )
 
-    corr_by_era = era_numerai_corr(predictions, cache["target"], cache["era"])
-    mmc_by_era = era_mmc(predictions, cache["target"], cache["era"], meta_model)
-    exposure_by_era = era_max_feature_corr(predictions, features[scoring_universe], cache["era"])
-    summary = summarize_era_scores(corr_by_era, mmc_by_era, exposure_by_era)
+    scores = score_predictions(
+        predictions,
+        cache["target"],
+        cache["era"],
+        meta_model=meta_model,
+        features=features[scoring_universe],
+    )
 
-    summary.to_csv(run_dir / "scores.csv")
-    corr_by_era.to_csv(run_dir / "era_corr.csv")
-    mmc_by_era.to_csv(run_dir / "era_mmc.csv")
-    exposure_by_era.to_csv(run_dir / "era_max_feature_corr.csv")
+    # Filenames predate the `*_by_era` field names and stay as they are: the
+    # surviving caches are read by name, and #91's recorded tables cite them.
+    scores.summary.to_csv(run_dir / "scores.csv")
+    scores.corr_by_era.to_csv(run_dir / "era_corr.csv")
+    scores.mmc_by_era.to_csv(run_dir / "era_mmc.csv")
+    scores.exposure_by_era.to_csv(run_dir / "era_max_feature_corr.csv")
     (run_dir / "scoring_strategies.json").write_text(
         json.dumps(
             {
@@ -443,10 +438,4 @@ def score_configs(
             indent=2,
         )
     )
-    return ScoreResult(
-        run_dir=run_dir,
-        summary=summary,
-        era_corr=corr_by_era,
-        era_mmc=mmc_by_era,
-        era_max_feature_corr=exposure_by_era,
-    )
+    return scores

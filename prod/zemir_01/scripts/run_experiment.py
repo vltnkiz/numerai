@@ -18,10 +18,18 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
-from zemir.config import LIVE, SMOKE, STRATEGIES, smoke as smoke_strategy
-from zemir.data import download, resolve_feature_sets
-from zemir.pipeline import RUNS_DIR, run_pipeline
-from zemir.strategy import required_columns
+from zemir.config import LIVE, MIN_VALIDATION_MEAN_CORR, SMOKE, STRATEGIES, smoke as smoke_strategy
+from zemir.data import download, load_meta_model, resolve_feature_sets
+from zemir.pipeline import (
+    RUNS_DIR,
+    feature_set_names,
+    format_gate,
+    format_run_scores,
+    record_gate,
+    run_columns,
+    run_pipeline,
+    score_run,
+)
 
 EXPERIMENTS_DIR = RUNS_DIR / "experiments"
 
@@ -43,10 +51,10 @@ def main() -> None:
     suffix = "-smoke" if args.smoke else ""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    feature_sets = resolve_feature_sets(config.data_version, strategy.feature_set_names)
+    feature_sets = resolve_feature_sets(config.data_version, feature_set_names(config, strategy))
     dataset = download(
         config.data_version,
-        required_columns(strategy, feature_sets),
+        run_columns(config, strategy, feature_sets),
         target_column=config.target_column,
     )
     result = run_pipeline(
@@ -61,14 +69,21 @@ def main() -> None:
     print(f"run_id: {result.run_id}")
     if args.smoke:
         print(f"  SMOKE RUN (max_eras={config.max_eras}) — scores are not meaningful")
-    for name, score in result.validation_scores.items():
-        print(f"  {name}: mean_corr={score.mean_corr:.4f}  sharpe={score.sharpe:.4f}")
-    print(
-        f"combined validation mean_corr: {result.combined_validation_score.mean_corr:.4f}  "
-        f"sharpe: {result.combined_validation_score.sharpe:.4f}  "
-        f"smart_sharpe: {result.combined_validation_score.smart_sharpe:.4f}"
-    )
+    # The live gate's own record and verdict, reported rather than enforced:
+    # an experiment never submits, so it has nothing to stop.
+    passed = record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)["passed"]
+    print(format_gate(result, threshold=MIN_VALIDATION_MEAN_CORR))
+    print(f"  the live run {'would submit' if passed else 'would NOT submit'} this")
     print(f"live predictions: {len(result.live_predictions)} rows (not submitted)")
+    # The cached meta model, never a refresh: only the live run keeps the
+    # shared copy current (issue #101). No try/except either: with no
+    # submission to protect, a scoring failure here should just crash.
+    scores = score_run(
+        result,
+        meta_model=load_meta_model(config.data_version),
+        scoring_universe=feature_sets[config.feature_set],
+    )
+    print(format_run_scores(scores))
     print(f"artifacts: {result.run_dir}")
 
 

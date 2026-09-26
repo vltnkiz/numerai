@@ -470,3 +470,44 @@ def test_score_configs_hands_the_whole_sweep_to_the_shared_blend_in_one_call(
     score_configs(rows, run_dir=fitted.run_dir)
 
     assert calls == [["p0.25", "p0.5", "p0.75"]]
+
+
+def test_a_live_runs_submitted_blend_row_is_the_harness_row_for_the_same_strategy(tmp_path, scoring_env):
+    """#93's destination, as one assertion: one scorer, one vocabulary, one number.
+
+    The same strategy, fitted by the same real trainers on the same data, once
+    by the harness and once by the live pipeline. The live run's
+    `combined_neutralized` row and the harness's row for that strategy agree
+    exactly in every column, and the gate's number is that row's `mean_corr`.
+    """
+    import zemir.harness as harness_module
+    from zemir.pipeline import SUBMITTED_BLEND, run_pipeline, score_run
+
+    strategy = replace(
+        TWO_MODELS,
+        models=(TWO_MODELS.models[0], replace(TWO_MODELS.models[1], neutralization=Neutralization(0.5, "narrow"))),
+        blend=_blend(weights={"linear": 0.3, "era_boost": 0.7}, neutralization=Neutralization(0.95, "medium")),
+    )
+    _, fitted = _fit(tmp_path / "harness", strategy=strategy)
+    harness = score_configs({"production": strategy}, run_dir=fitted.run_dir)
+
+    live = run_pipeline(
+        LIVE,
+        run_id="live",
+        strategy=strategy,
+        feature_sets=FEATURE_SETS,
+        dataset=make_dataset(),
+        runs_dir=tmp_path / "live",
+    )
+    scores = score_run(
+        live,
+        meta_model=harness_module.load_meta_model(LIVE.data_version),
+        scoring_universe=FEATURE_SETS[LIVE.feature_set],
+    )
+
+    # NaN would compare equal to NaN and prove nothing.
+    assert harness.summary.loc["production"].notna().all()
+    pd.testing.assert_series_equal(
+        scores.paid.summary.loc[SUBMITTED_BLEND], harness.summary.loc["production"], check_names=False
+    )
+    assert live.gate_corr == harness.summary.loc["production", "mean_corr"]
