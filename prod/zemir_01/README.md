@@ -24,6 +24,29 @@ scheduled task runs; it always fits `zemir.config.PRODUCTION_STRATEGY`. See
 [Scheduling](#scheduling) and
 [docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md](../../docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md).
 
+## Live scores: what Numerai actually scored
+
+Every number the live run computes is a **validation backtest**. The same
+fixed model scores the same eras identically every day, so none of it says
+what Numerai scored or pays. Numerai's per-round scores are recorded in
+`live_scores.jsonl`, and each live run updates it after the score log.
+To check it anytime, without training:
+
+```bash
+python scripts/live_scores.py
+```
+
+```text
+live (Numerai's scores, resolved rounds only):
+  zemir_01: 2 resolved of 17 scored rounds  corr20=0.002666  mmc20=-0.001662  payout_score=-0.014663 (3*corr60 + 15*mmc60)
+```
+
+The headline averages resolved rounds only. `payout_score` prices every round
+by the current formula, before stake, payout factor and clipping. Each row
+also keeps the round's own `payout_score` under the multipliers Numerai listed
+for it. See
+[docs/adr/0003-live-scores-come-from-numerai.md](../../docs/adr/0003-live-scores-come-from-numerai.md).
+
 ## Scheduling
 
 The live run is a Windows Task Scheduler task on the 5950X desktop (32
@@ -109,8 +132,8 @@ job 3–5 h late, after weekday staking had closed.
 - **Logs:** each invocation writes `runs/scheduled/<utc stamp>/run.log` and
   `pip_freeze.txt`. Dependencies aren't locked, so the freeze is how version
   drift is traced.
-- **Score log:** `score_log.jsonl` is committed with a pathspec commit (only
-  that file) and pushed, retrying once after `git pull --rebase`.
+- **Score log:** `score_log.jsonl` and `live_scores.jsonl` are committed with
+  a pathspec commit (only those files) and pushed, retrying once after `git pull --rebase`.
 
 ### Carried over from the workflow
 
@@ -200,15 +223,18 @@ CONTEXT.md, "Explanation"). It is gain/weight scale only; there is no SHAP.
 
 ### What it measures, and why those metrics
 
-Numerai pays `0.75 * corr20 + 2.25 * mmc20` — **MMC is weighted three times
-CORR**. Plain Spearman (the legacy `summarize_era_spearman`) is not a payout metric, so the
+Numerai paid `0.75 * corr20 + 2.25 * mmc20` on rounds up to 1342 — **MMC
+weighted three times CORR** — and pays `3 * corr60 + 15 * mmc60` from round
+1343. The harness still ranks on the first, as a proxy (docs/adr/0003). Plain Spearman (the legacy `summarize_era_spearman`) is not a payout metric, so the
 harness uses `numerai-tools`, Numerai's own reference implementation, for both:
 
 - **`mean_corr`** — `numerai_corr` per era over the full validation span.
 - **`mean_mmc`** — MMC against `meta_model.parquet`, which covers a *window* of
   validation (96 eras in v5.0), not all of it. `mean_corr_window` is CORR
-  restricted to those same eras, so the two halves of `payout` are comparable.
-- **`payout`** — the weighted combination, and the headline number.
+  restricted to those same eras, so the two halves of the proxy are comparable.
+- **`validation_payout_proxy`** — the weighted combination, and the column
+  sweeps rank by. A backtest ranking, not what any round pays: that is
+  Numerai's, in `live_scores.jsonl`.
 - **`max_feature_corr`** — largest absolute feature exposure per era, so
   neutralization's effect is visible rather than inferred.
 - **`sharpe` / `smart_sharpe`** — risk read-outs. Not payout metrics.
@@ -228,7 +254,7 @@ that was recorded can only be checked by model name, and its output says
 `unverified`.
 
 The table always carries a `production` row: `PRODUCTION_STRATEGY` scored like
-every other row. Its payout is the baseline. A cache that cannot express it (a
+every other row. Its `validation_payout_proxy` is the baseline. A cache that cannot express it (a
 model missing, or fitted with other hyperparameters) prints `BASELINE
 UNAVAILABLE` and the reason rather than substituting a nearby row.
 

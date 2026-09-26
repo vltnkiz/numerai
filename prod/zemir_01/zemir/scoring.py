@@ -108,9 +108,12 @@ def validate_predictions(predictions: pd.Series, era: pd.Series) -> None:
 # Numerai's *paid* metrics.
 #
 # `era_spearman` above uses plain Spearman, which is not what Numerai pays
-# on. Payout is `0.75 * corr20 + 2.25 * mmc20` — MMC carries three times the
-# weight of CORR — so a comparison made on Spearman alone can pick the wrong
-# architecture. These wrap `numerai-tools`, Numerai's own reference
+# on. `validation_payout_proxy` is `0.75 * corr20 + 2.25 * mmc20`, the formula
+# Numerai paid rounds up to 1342 on — MMC carries three times the weight of
+# CORR — so a comparison made on Spearman alone can pick the wrong
+# architecture. Rounds from 1343 pay on a different formula (60-day scores,
+# multipliers read per round from Numerai: `zemir.live_scores`), so this is a
+# ranking proxy for the harness and never a prediction of what a round pays. These wrap `numerai-tools`, Numerai's own reference
 # implementation, rather than reimplementing the formulas.
 #
 # Everything below this line is the vocabulary the live run and the harness
@@ -124,6 +127,9 @@ def validate_predictions(predictions: pd.Series, era: pd.Series) -> None:
 
 PAYOUT_CORR_MULTIPLIER = 0.75
 PAYOUT_MMC_MULTIPLIER = 2.25
+# The harness's ranking column. Named for what it is, so no table can pass it off
+# as Numerai's payout (see docs/adr/0003-live-scores-come-from-numerai.md).
+VALIDATION_PAYOUT_PROXY = "validation_payout_proxy"
 
 
 def _by_era(era: pd.Series, score: Callable[[pd.Index], pd.Series]) -> pd.DataFrame:
@@ -227,7 +233,8 @@ def summarize_era_scores(
 ) -> pd.DataFrame:
     """One row per prediction column — the comparison table.
 
-    `payout` weights CORR and MMC as Numerai does, and takes CORR from the
+    `VALIDATION_PAYOUT_PROXY` weights CORR and MMC as Numerai did for rounds up
+    to 1342, and takes CORR from the
     meta-model window so both halves are measured over the same eras. `mean_corr`
     over the full validation span is reported alongside, and the two are not
     interchangeable.
@@ -257,7 +264,7 @@ def summarize_era_scores(
             "max_feature_corr": exposure_by_era.mean(),
         }
     )
-    summary["payout"] = (
+    summary[VALIDATION_PAYOUT_PROXY] = (
         PAYOUT_CORR_MULTIPLIER * summary["mean_corr_window"]
         + PAYOUT_MMC_MULTIPLIER * summary["mean_mmc"]
     )

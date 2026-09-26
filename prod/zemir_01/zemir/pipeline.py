@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +17,7 @@ from zemir.data import Dataset, scoring_window
 from zemir.fitting import fit_strategy
 from zemir.models import FittedModel
 from zemir.scoring import (
+    VALIDATION_PAYOUT_PROXY,
     EraSpearmanScore,
     PredictionScores,
     era_numerai_corr,
@@ -38,7 +39,8 @@ SCORE_LOG_PATH = REPO_ROOT / "prod" / "zemir_01" / "score_log.jsonl"
 # isn't worth the code.
 RETENTION_DAYS = 365
 # Issue #98: the history log's entry shape. Schema 1 (#68) carries no marker.
-SCORE_LOG_SCHEMA = 2
+# Schema 3 drops `payout` from every `paid` row (docs/adr/0003).
+SCORE_LOG_SCHEMA = 3
 # The paid row's two counts, recorded as integers rather than floats.
 _INTEGER_SCORE_COLUMNS = {"eras", "mmc_eras"}
 _RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
@@ -88,7 +90,9 @@ class RunScores:
 
     `paid` is `score_predictions`' table over every column of
     `PipelineResult.validation_predictions`: the composition, and the files, a
-    harness scoring run produces. `spearman` holds the legacy **Spearman
+    harness scoring run produces, less `VALIDATION_PAYOUT_PROXY`. That column
+    ranks harness rows; on a live run it would only be misread as what Numerai
+    pays, which comes from Numerai (`zemir.live_scores`, docs/adr/0003). `spearman` holds the legacy **Spearman
     correlation** triple for each model and the raw blend, kept only so the
     history log's older entries stay comparable (issue #96).
     """
@@ -97,7 +101,7 @@ class RunScores:
     spearman: dict[str, EraSpearmanScore]
 
 
-def _load_numerai_models(env: dict[str, str] | None = None) -> dict[str, str]:
+def load_numerai_models(env: dict[str, str] | None = None) -> dict[str, str]:
     env = env if env is not None else os.environ
     raw = env.get("NUMERAI_MODELS", "")
     if not raw.strip():
@@ -134,7 +138,7 @@ def submit_predictions(
         public_id=os.environ["NUMERAI_PUBLIC_ID"],
         secret_key=os.environ["NUMERAI_SECRET_KEY"],
     )
-    models = _load_numerai_models()
+    models = load_numerai_models()
     if model_slot not in models:
         raise ValueError(
             f"model slot {model_slot!r} not found in NUMERAI_MODELS (have: {sorted(models)})"
@@ -335,6 +339,7 @@ def score_run(
         meta_model=meta_model,
         features=validation[scoring_universe],
     )
+    paid = replace(paid, summary=paid.summary.drop(columns=VALIDATION_PAYOUT_PROXY))
     spearman = {
         name: summarize_era_spearman(
             era_spearman(validation[["era", "target"]].assign(prediction=predictions[name]))
@@ -366,29 +371,34 @@ def score_run(
     return RunScores(paid=paid, spearman=spearman)
 
 
-# The paid columns a run prints. `mmc_eras` rides beside MMC and payout on
-# purpose: both are only comparable between runs scored over the same
-# meta-model window, and that window grows about one era a week (issue #101).
-_PRINTED_COLUMNS = ["eras", "mean_corr", "sharpe", "mmc_eras", "mean_mmc", "payout", "max_feature_corr"]
+# The paid columns a run prints. `mmc_eras` rides beside MMC on purpose: it is
+# only comparable between runs scored over the same meta-model window, and that
+# window grows about one era a week (issue #101).
+_PRINTED_COLUMNS = ["eras", "mean_corr", "sharpe", "mmc_eras", "mean_mmc", "max_feature_corr"]
 
 
 def format_gate(result: PipelineResult, *, threshold: float) -> str:
     """The gate's one line: which number, on which artifact, against which floor."""
     verdict = "pass" if not result.gate_corr < threshold else "FAIL"
     return (
-        f"gate: numerai_corr({SUBMITTED_BLEND}) = {result.gate_corr:.6f}, "
+        f"gate: validation (backtest) numerai_corr({SUBMITTED_BLEND}) = {result.gate_corr:.6f}, "
         f"floor MIN_VALIDATION_MEAN_CORR = {threshold:.4f}: {verdict}"
     )
 
 
 def format_run_scores(scores: RunScores) -> str:
-    """The paid table, then the raw blend's legacy Spearman line, labelled as legacy."""
+    """The paid table, then the raw blend's legacy Spearman line, each labelled as a backtest.
+
+    Nothing here is a Numerai score: the same fixed model scores the same
+    validation eras identically every day. Numerai's own per-round scores are
+    `zemir.live_scores`' to print.
+    """
     legacy = scores.spearman[RAW_BLEND]
     return "\n".join(
         [
-            "validation, Numerai CORR / MMC (the harness's vocabulary):",
+            "validation (backtest, not a Numerai score), Numerai CORR / MMC:",
             scores.paid.summary[_PRINTED_COLUMNS].to_string(float_format=lambda v: f"{v:.6f}"),
-            f"legacy Spearman, {RAW_BLEND}: mean_corr={legacy.mean_corr:.4f}  "
+            f"validation (backtest) legacy Spearman, {RAW_BLEND}: mean_corr={legacy.mean_corr:.4f}  "
             f"sharpe={legacy.sharpe:.4f}  smart_sharpe={legacy.smart_sharpe:.4f}",
         ]
     )
@@ -468,9 +478,10 @@ def append_score_log(
 
     Schema 2 (issue #98) nests by artifact — `models`, `raw_blend`,
     `submitted_blend` — and within each by vocabulary: `paid` is the
-    artifact's full harness row, `mmc_eras` included, so MMC and payout carry
-    their window; `spearman` is the legacy triple, present only where schema 1
-    recorded one. An entry with no `schema` key is schema 1:
+    artifact's harness row, `mmc_eras` included, so MMC carries its window;
+    `spearman` is the legacy triple, present only where schema 1 recorded one.
+    Schema 3 is schema 2 without `payout` in `paid` (docs/adr/0003); schema 2
+    entries keep theirs as written. An entry with no `schema` key is schema 1:
     `{run_id, target_column, models, combined, submission_id}`, Spearman only,
     `combined` being the raw blend. Those are left exactly as written.
     """

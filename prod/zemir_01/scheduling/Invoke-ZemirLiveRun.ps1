@@ -5,7 +5,7 @@ Scheduled entrypoint for zemir_01's live run (issue #69). Registered by Register
 .DESCRIPTION
 Everything around the pipeline that isn't the pipeline: checks the checkout is
 a clean `main`, pulls, installs, runs scripts/run_pipeline.py, commits the
-score log, and opens a GitHub issue when something fails. Whether there is a
+score log and the live scores, and opens a GitHub issue when something fails. Whether there is a
 round to run at all is decided in Python (zemir.schedule), so this is safe to
 start from any trigger, any number of times.
 
@@ -31,6 +31,7 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $zemir = Join-Path $repo 'prod\zemir_01'
 $python = Join-Path $repo '.venv\Scripts\python.exe'
 $scoreLog = 'prod/zemir_01/score_log.jsonl'
+$liveScores = 'prod/zemir_01/live_scores.jsonl'
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
 $logDir = Join-Path $zemir "runs\scheduled\$stamp"
 New-Item -ItemType Directory -Force $logDir | Out-Null
@@ -175,11 +176,14 @@ if ($DryRun) {
 }
 
 # Whatever the pipeline's outcome - a gate failure still appends its scores (issue #68).
-git add -- $scoreLog 2>$null
-git diff --cached --quiet -- $scoreLog 2>$null
+# live_scores.jsonl is Numerai's per-round record (docs/adr/0003); it may not exist
+# yet, and `git add` of a missing path fails, so it is added only once it does.
+$records = @($scoreLog) + @($liveScores | Where-Object { Test-Path (Join-Path $repo $_) })
+git add -- $records 2>$null
+git diff --cached --quiet -- $records 2>$null
 if ($LASTEXITCODE -ne 0) {
-    # Pathspec commit: only the score log, whatever else might be staged.
-    $pushed = (Invoke-Logged "git commit -m `"Record score_log entry for scheduled run $stamp`" -- $scoreLog") -eq 0 -and
+    # Pathspec commit: only the two records, whatever else might be staged.
+    $pushed = (Invoke-Logged "git commit -m `"Record score_log entry for scheduled run $stamp`" -- $($records -join ' ')") -eq 0 -and
         ((Invoke-Logged 'git push') -eq 0 -or
          ((Invoke-Logged 'git pull --rebase') -eq 0 -and (Invoke-Logged 'git push') -eq 0))
     if (-not $pushed) { Publish-Failure 'score log push failed' }

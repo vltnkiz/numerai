@@ -18,7 +18,12 @@ from zemir.pipeline import (
     run_pipeline,
     score_run,
 )
-from zemir.scoring import era_numerai_corr, era_spearman, summarize_era_spearman
+from zemir.scoring import (
+    VALIDATION_PAYOUT_PROXY,
+    era_numerai_corr,
+    era_spearman,
+    summarize_era_spearman,
+)
 from zemir.strategy import BlendSpec, Neutralization, Strategy, required_columns
 
 from factories import FEATURE_SETS, SIGNAL_COLUMN, make_dataset, predict_column_spec
@@ -202,7 +207,7 @@ _SCHEMA_1_LINE = (
 
 
 def _logged(tmp_path, *, scored=True):
-    """Append one schema 2 entry to `tmp_path`'s log; return the run and that entry."""
+    """Append one `SCORE_LOG_SCHEMA` entry to `tmp_path`'s log; return the run and that entry."""
     result = _run(tmp_path, _two_models(blend_neutralization=Neutralization(0.5, "medium")), "logged")
     gate = record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
     scores = (
@@ -218,14 +223,14 @@ def _logged(tmp_path, *, scored=True):
     return result, json.loads(log.read_text().splitlines()[-1])
 
 
-def test_a_schema_2_entry_nests_by_artifact_then_by_vocabulary(tmp_path, fake_trainers):
+def test_a_schema_3_entry_nests_by_artifact_then_by_vocabulary(tmp_path, fake_trainers):
     result, entry = _logged(tmp_path)
 
     assert list(entry) == [
         "schema", "run_id", "target_column", "gate",
         "models", "raw_blend", "submitted_blend", "submission_id",
     ]
-    assert entry["schema"] == SCORE_LOG_SCHEMA == 2
+    assert entry["schema"] == SCORE_LOG_SCHEMA == 3
     assert list(entry["models"]) == ["m1", "m2"]
     # Spearman stays exactly where schema 1 had it, and nowhere new.
     for artifact in (*entry["models"].values(), entry["raw_blend"]):
@@ -245,8 +250,18 @@ def test_a_logged_paid_row_is_the_run_directorys_harness_row(tmp_path, fake_trai
     for name, paid in logged.items():
         assert list(paid) == list(table.columns)
         assert paid == pytest.approx(table.loc[name].to_dict())
-        # The counts stay integers: `mmc_eras` is the window MMC and payout were measured over.
+        # The counts stay integers: `mmc_eras` is the window MMC was measured over.
         assert isinstance(paid["eras"], int) and isinstance(paid["mmc_eras"], int)
+
+
+def test_a_live_run_records_no_payout_of_its_own(tmp_path, fake_trainers):
+    """What Numerai pays comes from Numerai (docs/adr/0003); the harness's proxy stays in the harness."""
+    result, entry = _logged(tmp_path)
+
+    table = pd.read_csv(result.run_dir / "scores.csv", index_col="config")
+    for column in ("payout", VALIDATION_PAYOUT_PROXY):
+        assert column not in table.columns
+        assert column not in entry["submitted_blend"]["paid"]
 
 
 def test_the_logged_gate_is_gate_json_and_the_submitted_blends_corr(tmp_path, fake_trainers):
@@ -265,7 +280,7 @@ def test_a_failed_score_keeps_the_entry_its_gate_and_its_submission(tmp_path, fa
     assert entry["submission_id"] == "sub-1"
 
 
-def test_schema_1_entries_survive_a_schema_2_append_untouched_and_still_prune(tmp_path, fake_trainers):
+def test_schema_1_entries_survive_a_schema_3_append_untouched_and_still_prune(tmp_path, fake_trainers):
     """Old entries are read through their missing `schema`, never migrated (issue #98)."""
     log = tmp_path / "score_log.jsonl"
     expired = json.dumps({**json.loads(_SCHEMA_1_LINE), "run_id": "20240101T120000Z"})
@@ -276,7 +291,7 @@ def test_schema_1_entries_survive_a_schema_2_append_untouched_and_still_prune(tm
     kept, new = log.read_text().splitlines()
     assert kept == _SCHEMA_1_LINE
     assert "schema" not in json.loads(kept)
-    assert json.loads(new)["schema"] == 2
+    assert json.loads(new)["schema"] == 3
 
 
 def test_run_columns_adds_the_scoring_universe_and_nothing_for_production_shaped_strategies():

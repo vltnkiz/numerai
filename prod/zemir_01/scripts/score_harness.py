@@ -4,7 +4,7 @@
 The cheap half of the measurement backbone: seconds, repeatable, and never
 refits. Point it at a run written by fit_harness.py. The table always includes a
 `production` row — `PRODUCTION_STRATEGY` scored under the same transform as the
-rest — and reports its payout as the baseline, or says plainly that this cache
+rest — and reports its validation payout proxy as the baseline, or says plainly that this cache
 cannot express it.
 
 Usage:
@@ -27,6 +27,7 @@ from zemir.harness import (
     score_configs,
     unscoreable_reason,
 )
+from zemir.scoring import VALIDATION_PAYOUT_PROXY
 
 # The row that scores what production actually ships, under the same transform as every other row.
 BASELINE_ROW = "production"
@@ -41,7 +42,7 @@ REPORTED_COLUMNS = [
     "mean_mmc",
     "mmc_sharpe",
     "max_feature_corr",
-    "payout",
+    VALIDATION_PAYOUT_PROXY,
 ]
 
 
@@ -67,7 +68,7 @@ def main() -> None:
         strategies[BASELINE_ROW] = PRODUCTION_STRATEGY
     result = score_configs(strategies, run_dir=run_dir)
 
-    ranked = result.summary.sort_values("payout", ascending=False)
+    ranked = result.summary.sort_values(VALIDATION_PAYOUT_PROXY, ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):
         print(f"cache: {run_dir}\n")
         print(ranked[REPORTED_COLUMNS].to_string(float_format=lambda v: f"{v:.6f}"))
@@ -75,7 +76,7 @@ def main() -> None:
     if baseline_problem is None:
         baseline = result.summary.loc[BASELINE_ROW]
         unverified = "" if record.verified else " (unverified: this cache predates recorded strategies)"
-        print(f"\nbaseline ({BASELINE_ROW}): payout {baseline['payout']:.6f}{unverified}")
+        print(f"\nbaseline ({BASELINE_ROW}): {VALIDATION_PAYOUT_PROXY} {baseline[VALIDATION_PAYOUT_PROXY]:.6f}{unverified}")
     else:
         # Loud on purpose: a baseline that quietly goes missing (or is swapped for a
         # nearby row) is the defect the old string constant was.

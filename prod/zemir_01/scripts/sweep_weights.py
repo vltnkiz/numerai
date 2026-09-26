@@ -3,7 +3,7 @@
 
 The reusable half of #30's deliverable: given any cached fit (from
 scripts/fit_harness.py), sweep how much weight each model gets in the blend
-and rank by payout. Reused whenever a model joins, leaves, or the fit changes
+and rank by the validation payout proxy. Reused whenever a model joins, leaves, or the fit changes
 — not a one-off for linear vs era_boost.
 
 Usage:
@@ -21,6 +21,7 @@ import pandas as pd
 
 from zemir.config import weight_sweep
 from zemir.harness import HARNESS_DIR, PREDICTIONS_FILENAME, load_fit_record, score_configs
+from zemir.scoring import VALIDATION_PAYOUT_PROXY
 
 REPORTED_COLUMNS = [
     "eras",
@@ -32,7 +33,7 @@ REPORTED_COLUMNS = [
     "mean_mmc",
     "mmc_sharpe",
     "max_feature_corr",
-    "payout",
+    VALIDATION_PAYOUT_PROXY,
 ]
 
 
@@ -62,7 +63,7 @@ def main() -> None:
     )
     result = score_configs(strategies, run_dir=run_dir)
 
-    ranked = result.summary.sort_values("payout", ascending=False)
+    ranked = result.summary.sort_values(VALIDATION_PAYOUT_PROXY, ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):
         print(f"cache: {run_dir}\n")
         print(ranked[REPORTED_COLUMNS].to_string(float_format=lambda v: f"{v:.6f}"))

@@ -78,6 +78,12 @@ def live(tmp_path, monkeypatch, fake_trainers):
     monkeypatch.setattr(script, "score_run", score_run)
     monkeypatch.setattr(script, "refresh_validation", lambda version: events.append("refresh_validation"))
     monkeypatch.setattr(script, "append_score_log", partial(script.append_score_log, log_path=log_path))
+    monkeypatch.setattr(script, "load_numerai_models", lambda: {"zemir_01": "model-id"})
+    monkeypatch.setattr(
+        script,
+        "update_record",
+        lambda models: events.append(f"update_live_scores({sorted(models)})") or [],
+    )
     return script, events, log_path
 
 
@@ -91,6 +97,7 @@ def test_everything_recorded_only_runs_after_the_upload(live):
         "record_outcome",
         "load_meta_model(refresh=True)",
         "score_run",
+        "update_live_scores(['zemir_01'])",
         "refresh_validation",
     ]
     entry = json.loads(log_path.read_text())
@@ -133,6 +140,30 @@ def test_a_gate_failure_still_exits_2_and_is_logged_before_any_upload(live, monk
     assert entry["submission_id"] is None
     assert entry["gate"]["passed"] is False and entry["gate"]["threshold"] == 2.0
     assert entry["raw_blend"] is not None
+
+
+def test_a_failed_live_score_fetch_never_changes_the_runs_outcome(live, monkeypatch, capsys):
+    script, events, log_path = live
+
+    def unreachable(models):
+        raise ConnectionError("api-tournament.numer.ai unreachable")
+
+    monkeypatch.setattr(script, "update_record", unreachable)
+
+    assert script.main() == 0
+
+    assert "submit" in events
+    assert "fetching Numerai's live scores failed" in capsys.readouterr().out
+    assert json.loads(log_path.read_text())["submission_id"] == "sub-1"
+
+
+def test_a_gate_failure_still_fetches_the_live_scores(live, monkeypatch):
+    script, events, log_path = live
+    monkeypatch.setattr(script, "MIN_VALIDATION_MEAN_CORR", 2.0)
+
+    assert script.main() == script.EXIT_GATE_FAILED
+
+    assert "update_live_scores(['zemir_01'])" in events
 
 
 def test_a_round_change_skips_the_validation_refresh(live, monkeypatch):
