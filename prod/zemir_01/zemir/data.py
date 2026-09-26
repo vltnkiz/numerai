@@ -4,6 +4,7 @@ import json
 import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,9 @@ from numerapi import NumerAPI
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DATASETS_DIR = REPO_ROOT / "datasets"
+# Numerai resolves about one validation era a week, so a daily 5.6 GB pull
+# would mostly fetch identical bytes.
+VALIDATION_MAX_AGE = timedelta(days=7)
 
 
 @dataclass
@@ -212,6 +216,61 @@ def load_meta_model(
         )
     frame = pd.read_parquet(path, columns=["numerai_meta_model"])
     return frame["numerai_meta_model"].dropna()
+
+
+def refresh_validation(
+    version: str,
+    *,
+    napi: NumerAPI | None = None,
+    max_age: timedelta = VALIDATION_MAX_AGE,
+    now: datetime | None = None,
+) -> bool:
+    """Re-download validation.parquet when the on-disk copy is older than `max_age`.
+
+    Numerai keeps resolving validation eras (targets arrive ~4 weeks after an
+    era), so a frozen copy stops the gate's frame and the meta-model window at
+    whatever it held the day it was fetched. Only the live run calls this, as
+    its very last step, after the upload and the score log: the next run's
+    gate reads the new copy, and every later harness fit does too. An old
+    harness cache is unaffected — it carries its own eras and targets and
+    reads features by id.
+
+    Downloads to a staging file and swaps it in only once its footer reads
+    and carries `era` and `target`, because the next run reads this file
+    *before* it uploads: a broken copy there would cost a submission. Staging
+    leftovers are deleted first — numerapi resumes any `<dest>.temp` without
+    checking that the server's file is still the same one, which would splice
+    two versions together. Any failure warns and keeps the old copy; returns
+    whether the copy was replaced.
+    """
+    path = DATASETS_DIR / version / "validation.parquet"
+    now = now or datetime.now(timezone.utc)
+    if path.exists():
+        age = now - datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        if age < max_age:
+            return False
+    staging = path.with_name(path.name + ".new")
+    temp = staging.with_name(staging.name + ".temp")
+    try:
+        staging.unlink(missing_ok=True)
+        temp.unlink(missing_ok=True)
+        (napi or NumerAPI()).download_dataset(
+            f"v{version}/validation.parquet", dest_path=str(staging)
+        )
+        missing = {"era", "target"} - set(pq.read_schema(staging).names)
+        if missing:
+            raise ValueError(f"downloaded copy lacks {sorted(missing)}")
+        staging.replace(path)
+    except Exception as exc:
+        warnings.warn(
+            f"validation.parquet refresh failed ({exc!r}); keeping the existing copy",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        for leftover in (staging, temp):
+            leftover.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def download(
