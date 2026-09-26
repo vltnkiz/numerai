@@ -113,7 +113,8 @@ def main() -> int:
     # The gate guards submission, so it sits with submission — not inside the
     # pipeline, which cannot submit and so has nothing to stop. Its number is
     # the only score computed before the upload (issue #97).
-    below_gate = not record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    gate = record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    below_gate = not gate["passed"]
     print(format_gate(result, threshold=MIN_VALIDATION_MEAN_CORR))
     # A new round opening mid-fit would receive predictions made from the
     # previous round's live features. Not a final outcome: the wrapper reruns
@@ -175,7 +176,8 @@ def main() -> int:
     append_score_log(
         run_id=result.run_id,
         target_column=config.target_column,
-        spearman=scores.spearman if scores else None,
+        gate=gate,
+        scores=scores,
         submission_id=submission.submission_id if submission else None,
     )
     if below_gate:

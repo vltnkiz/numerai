@@ -37,12 +37,17 @@ SCORE_LOG_PATH = REPO_ROOT / "prod" / "zemir_01" / "score_log.jsonl"
 # the machine running the live job has hundreds of GB free, so pruning them
 # isn't worth the code.
 RETENTION_DAYS = 365
+# Issue #98: the history log's entry shape. Schema 1 (#68) carries no marker.
+SCORE_LOG_SCHEMA = 2
+# The paid row's two counts, recorded as integers rather than floats.
+_INTEGER_SCORE_COLUMNS = {"eras", "mmc_eras"}
 _RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
 
 # The two blends a live run scores, as columns beside each model's (issue #97).
-# `combined` is the raw blend, never submitted, under the name the history log
-# has always used for it; `combined_neutralized` is the submitted blend, the one
-# the gate reads and the one a harness row measures. See CONTEXT.md.
+# `combined` is the raw blend, never submitted, under the name schema 1 of the
+# history log used for it (schema 2 says `raw_blend`, issue #98);
+# `combined_neutralized` is the submitted blend, the one the gate reads and the
+# one a harness row measures. See CONTEXT.md.
 RAW_BLEND = "combined"
 SUBMITTED_BLEND = "combined_neutralized"
 
@@ -285,28 +290,24 @@ def run_pipeline(
     )
 
 
-def record_gate(result: PipelineResult, *, threshold: float) -> bool:
-    """Whether the submitted blend clears the gate, written to `gate.json` before any upload.
+def record_gate(result: PipelineResult, *, threshold: float) -> dict:
+    """The gate's record, written to `gate.json` before any upload, and returned.
 
-    Passes exactly when `gate_corr >= threshold`. Written first, so the gate's
+    `passed` is exactly `gate_corr >= threshold`. Written first, so the gate's
     evidence survives whatever happens after it: a failed upload, or a failed
-    post-submission score.
+    post-submission score. The same record becomes the history log entry's
+    `gate` (issue #98), so the two never describe the gate in different shapes.
     """
-    passed = not result.gate_corr < threshold
-    (result.run_dir / "gate.json").write_text(
-        json.dumps(
-            {
-                "metric": "numerai_corr",
-                "artifact": SUBMITTED_BLEND,
-                "eras": int(result.validation["era"].nunique()),
-                "mean_corr": result.gate_corr,
-                "threshold": threshold,
-                "passed": passed,
-            },
-            indent=2,
-        )
-    )
-    return passed
+    record = {
+        "metric": "numerai_corr",
+        "artifact": SUBMITTED_BLEND,
+        "eras": int(result.validation["era"].nunique()),
+        "mean_corr": result.gate_corr,
+        "threshold": threshold,
+        "passed": not result.gate_corr < threshold,
+    }
+    (result.run_dir / "gate.json").write_text(json.dumps(record, indent=2))
+    return record
 
 
 def score_run(
@@ -321,7 +322,7 @@ def score_run(
     the harness's composition, dtype and filenames, so a live run directory's
     scores read like a harness cache's. The Spearman triple is taken on the
     unconverted predictions, the inputs it has always had, so the history log's
-    `models` and `combined` keep the numbers they would always have had.
+    Spearman series runs unbroken across its schema 1 and schema 2 entries.
     `scoring_universe` is what exposure is measured against: the run's
     `feature_set`, never a strategy's own columns.
     """
@@ -445,33 +446,42 @@ def append_score_log(
     *,
     run_id: str,
     target_column: str,
-    spearman: Mapping[str, EraSpearmanScore] | None,
+    gate: Mapping[str, object],
+    scores: RunScores | None,
     submission_id: str | None,
     log_path: Path = SCORE_LOG_PATH,
     now: datetime | None = None,
 ) -> None:
-    """Append one live run's scores to the cross-run history log.
+    """Append one live run's `SCORE_LOG_SCHEMA` entry to the cross-run history log.
 
     Called for every scripts/run_pipeline.py invocation regardless of the
-    validation-score gate, so a run that fails the gate still leaves a trace —
-    the gate only catches a run crashing through the floor, not one quietly
-    declining above it (issue #68). Prunes entries older than
-    `RETENTION_DAYS` on each append, so the file stays small forever rather
-    than growing without bound.
+    gate, so a run that fails the gate still leaves a trace — the gate only
+    catches a run crashing through the floor, not one quietly declining above
+    it (issue #68). Prunes entries older than `RETENTION_DAYS` on each append,
+    so the file stays small forever rather than growing without bound. The
+    prune reads nothing but `run_id`, so it spans every schema.
 
-    `spearman` is `RunScores.spearman`: each model's and the raw blend's
-    Spearman triple, recorded under `models` and `combined` exactly as since
-    #68. `None` means post-submission scoring failed. The entry is still
-    written, with both keys `null`, so neither the run nor its submission ever
-    goes missing from the log (issue #97).
+    `gate` is `record_gate`'s record, known before the upload. `scores` is
+    `score_run`'s; `None` means post-submission scoring failed, and the entry
+    is still written with its three artifacts `null`, so neither the run nor
+    its submission ever goes missing from the log (issue #97).
+
+    Schema 2 (issue #98) nests by artifact — `models`, `raw_blend`,
+    `submitted_blend` — and within each by vocabulary: `paid` is the
+    artifact's full harness row, `mmc_eras` included, so MMC and payout carry
+    their window; `spearman` is the legacy triple, present only where schema 1
+    recorded one. An entry with no `schema` key is schema 1:
+    `{run_id, target_column, models, combined, submission_id}`, Spearman only,
+    `combined` being the raw blend. Those are left exactly as written.
     """
 
-    def _score_dict(score: EraSpearmanScore) -> dict[str, float]:
-        return {
-            "mean_corr": score.mean_corr,
-            "sharpe": score.sharpe,
-            "smart_sharpe": score.smart_sharpe,
-        }
+    def _paid(name: str) -> dict[str, float | int]:
+        row = scores.paid.summary.loc[name]
+        return {k: int(v) if k in _INTEGER_SCORE_COLUMNS else float(v) for k, v in row.items()}
+
+    def _spearman(name: str) -> dict[str, float]:
+        s = scores.spearman[name]
+        return {"mean_corr": s.mean_corr, "sharpe": s.sharpe, "smart_sharpe": s.smart_sharpe}
 
     now = now or datetime.now(timezone.utc)
     entries = []
@@ -482,16 +492,22 @@ def append_score_log(
         for e in entries
         if (age := _run_id_age_days(e["run_id"], now=now)) is not None and age <= RETENTION_DAYS
     ]
+    models = [name for name in scores.spearman if name != RAW_BLEND] if scores else []
     entries.append(
         {
+            "schema": SCORE_LOG_SCHEMA,
             "run_id": run_id,
             "target_column": target_column,
+            "gate": dict(gate),
             "models": (
-                {name: _score_dict(s) for name, s in spearman.items() if name != RAW_BLEND}
-                if spearman is not None
+                {name: {"paid": _paid(name), "spearman": _spearman(name)} for name in models}
+                if scores
                 else None
             ),
-            "combined": _score_dict(spearman[RAW_BLEND]) if spearman is not None else None,
+            "raw_blend": (
+                {"paid": _paid(RAW_BLEND), "spearman": _spearman(RAW_BLEND)} if scores else None
+            ),
+            "submitted_blend": {"paid": _paid(SUBMITTED_BLEND)} if scores else None,
             "submission_id": submission_id,
         }
     )

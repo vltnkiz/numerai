@@ -9,6 +9,7 @@ import pytest
 from zemir.config import LIVE, MIN_VALIDATION_MEAN_CORR
 from zemir.pipeline import (
     RAW_BLEND,
+    SCORE_LOG_SCHEMA,
     SUBMITTED_BLEND,
     append_score_log,
     feature_set_names,
@@ -66,7 +67,7 @@ def test_run_pipeline_gate_passes_when_predictions_track_the_target(tmp_path, fa
         runs_dir=tmp_path,
     )
 
-    assert record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    assert record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)["passed"]
 
 
 def test_run_pipeline_gate_fails_when_predictions_are_anti_correlated_with_the_target(
@@ -86,7 +87,7 @@ def test_run_pipeline_gate_fails_when_predictions_are_anti_correlated_with_the_t
     )
 
     # A sign flip: the one failure a floor of zero exists to catch (issue #95).
-    assert not record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    assert not record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)["passed"]
 
 
 def test_a_weak_but_positive_fit_passes_the_gate_by_design(tmp_path, fake_trainers):
@@ -105,7 +106,7 @@ def test_a_weak_but_positive_fit_passes_the_gate_by_design(tmp_path, fake_traine
     )
 
     assert 0.0 < result.gate_corr < 0.2
-    assert record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    assert record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)["passed"]
 
 
 def test_the_gate_reads_the_submitted_blend_not_the_raw_one(tmp_path, fake_trainers):
@@ -126,7 +127,7 @@ def test_the_gate_reads_the_submitted_blend_not_the_raw_one(tmp_path, fake_train
     )[RAW_BLEND].mean()
 
     assert result.gate_corr < raw_corr
-    assert not record_gate(result, threshold=(result.gate_corr + raw_corr) / 2)
+    assert not record_gate(result, threshold=(result.gate_corr + raw_corr) / 2)["passed"]
 
 
 def test_gate_json_is_the_gates_whole_record(tmp_path, fake_trainers):
@@ -189,27 +190,93 @@ def test_score_run_keeps_the_spearman_numbers_the_old_pipeline_produced(tmp_path
         assert scores.spearman[name].smart_sharpe == old.smart_sharpe
 
 
-def test_the_score_log_keeps_its_shape_and_keeps_the_entry_when_scoring_failed(tmp_path, fake_trainers):
-    result = _run(tmp_path, _two_models(), "logged")
-    scores = score_run(result, meta_model=_meta_model(result), scoring_universe=FEATURE_SETS["medium"])
+# A real schema 1 line, verbatim from `main`'s score_log.jsonl (run 20260913T153408Z).
+_SCHEMA_1_LINE = (
+    '{"run_id": "20260913T153408Z", "target_column": "target_ender_20", "models": '
+    '{"linear": {"mean_corr": 0.011501036853377153, "sharpe": 0.7984957419788119, '
+    '"smart_sharpe": 0.4068356614265501}, "era_boost": {"mean_corr": 0.01553631190221167, '
+    '"sharpe": 0.9756091961997563, "smart_sharpe": 0.38605499211868055}}, "combined": '
+    '{"mean_corr": 0.016447134682809162, "sharpe": 1.0357329577053016, '
+    '"smart_sharpe": 0.41590757858848304}, "submission_id": "cca7a0a1-ac8d-4ee9-a1b7-fe38ce084ae4"}'
+)
+
+
+def _logged(tmp_path, *, scored=True):
+    """Append one schema 2 entry to `tmp_path`'s log; return the run and that entry."""
+    result = _run(tmp_path, _two_models(blend_neutralization=Neutralization(0.5, "medium")), "logged")
+    gate = record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    scores = (
+        score_run(result, meta_model=_meta_model(result), scoring_universe=FEATURE_SETS["medium"])
+        if scored
+        else None
+    )
     log = tmp_path / "score_log.jsonl"
-    now = datetime(2026, 9, 26, tzinfo=timezone.utc)
-
     append_score_log(
-        run_id="20260926T120000Z", target_column="target", spearman=scores.spearman,
-        submission_id="sub-1", log_path=log, now=now,
+        run_id="20260926T120000Z", target_column="target", gate=gate, scores=scores,
+        submission_id="sub-1", log_path=log, now=datetime(2026, 9, 26, 13, tzinfo=timezone.utc),
     )
-    append_score_log(
-        run_id="20260926T130000Z", target_column="target", spearman=None,
-        submission_id="sub-2", log_path=log, now=now,
-    )
+    return result, json.loads(log.read_text().splitlines()[-1])
 
-    scored, failed = [json.loads(line) for line in log.read_text().splitlines()]
-    assert list(scored) == ["run_id", "target_column", "models", "combined", "submission_id"]
-    assert list(scored["models"]) == ["m1", "m2"]
-    assert list(scored["combined"]) == ["mean_corr", "sharpe", "smart_sharpe"]
-    assert failed["models"] is None and failed["combined"] is None
-    assert failed["submission_id"] == "sub-2"
+
+def test_a_schema_2_entry_nests_by_artifact_then_by_vocabulary(tmp_path, fake_trainers):
+    result, entry = _logged(tmp_path)
+
+    assert list(entry) == [
+        "schema", "run_id", "target_column", "gate",
+        "models", "raw_blend", "submitted_blend", "submission_id",
+    ]
+    assert entry["schema"] == SCORE_LOG_SCHEMA == 2
+    assert list(entry["models"]) == ["m1", "m2"]
+    # Spearman stays exactly where schema 1 had it, and nowhere new.
+    for artifact in (*entry["models"].values(), entry["raw_blend"]):
+        assert list(artifact) == ["paid", "spearman"]
+        assert list(artifact["spearman"]) == ["mean_corr", "sharpe", "smart_sharpe"]
+    assert list(entry["submitted_blend"]) == ["paid"]
+
+
+def test_a_logged_paid_row_is_the_run_directorys_harness_row(tmp_path, fake_trainers):
+    """The log's `paid` is `scores.csv`, column for column, so it reads like a harness table."""
+    result, entry = _logged(tmp_path)
+
+    table = pd.read_csv(result.run_dir / "scores.csv", index_col="config")
+    logged = {name: entry["models"][name]["paid"] for name in ("m1", "m2")}
+    logged[RAW_BLEND] = entry["raw_blend"]["paid"]
+    logged[SUBMITTED_BLEND] = entry["submitted_blend"]["paid"]
+    for name, paid in logged.items():
+        assert list(paid) == list(table.columns)
+        assert paid == pytest.approx(table.loc[name].to_dict())
+        # The counts stay integers: `mmc_eras` is the window MMC and payout were measured over.
+        assert isinstance(paid["eras"], int) and isinstance(paid["mmc_eras"], int)
+
+
+def test_the_logged_gate_is_gate_json_and_the_submitted_blends_corr(tmp_path, fake_trainers):
+    result, entry = _logged(tmp_path)
+
+    assert entry["gate"] == json.loads((result.run_dir / "gate.json").read_text())
+    assert entry["gate"]["mean_corr"] == pytest.approx(entry["submitted_blend"]["paid"]["mean_corr"])
+
+
+def test_a_failed_score_keeps_the_entry_its_gate_and_its_submission(tmp_path, fake_trainers):
+    result, entry = _logged(tmp_path, scored=False)
+
+    assert entry["models"] is None
+    assert entry["raw_blend"] is None and entry["submitted_blend"] is None
+    assert entry["gate"]["passed"] is True
+    assert entry["submission_id"] == "sub-1"
+
+
+def test_schema_1_entries_survive_a_schema_2_append_untouched_and_still_prune(tmp_path, fake_trainers):
+    """Old entries are read through their missing `schema`, never migrated (issue #98)."""
+    log = tmp_path / "score_log.jsonl"
+    expired = json.dumps({**json.loads(_SCHEMA_1_LINE), "run_id": "20240101T120000Z"})
+    log.write_text(expired + "\n" + _SCHEMA_1_LINE + "\n")
+
+    _logged(tmp_path)  # appends to the same `score_log.jsonl`
+
+    kept, new = log.read_text().splitlines()
+    assert kept == _SCHEMA_1_LINE
+    assert "schema" not in json.loads(kept)
+    assert json.loads(new)["schema"] == 2
 
 
 def test_run_columns_adds_the_scoring_universe_and_nothing_for_production_shaped_strategies():

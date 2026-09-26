@@ -71,7 +71,7 @@ def main() -> None:
         print(f"  SMOKE RUN (max_eras={config.max_eras}) — scores are not meaningful")
     # The live gate's own record and verdict, reported rather than enforced:
     # an experiment never submits, so it has nothing to stop.
-    passed = record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    passed = record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)["passed"]
     print(format_gate(result, threshold=MIN_VALIDATION_MEAN_CORR))
     print(f"  the live run {'would submit' if passed else 'would NOT submit'} this")
     print(f"live predictions: {len(result.live_predictions)} rows (not submitted)")

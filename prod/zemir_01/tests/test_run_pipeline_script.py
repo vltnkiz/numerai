@@ -89,7 +89,7 @@ def test_everything_recorded_only_runs_after_the_upload(live):
     entry = json.loads(log_path.read_text())
     assert entry["submission_id"] == "sub-1"
     assert list(entry["models"]) == ["linear"]
-    assert entry["combined"] is not None
+    assert entry["submitted_blend"]["paid"]["mean_corr"] == pytest.approx(entry["gate"]["mean_corr"])
 
 
 def test_a_failure_after_the_upload_keeps_the_log_entry_and_exits_6(live, monkeypatch, capsys):
@@ -108,7 +108,8 @@ def test_a_failure_after_the_upload_keeps_the_log_entry_and_exits_6(live, monkey
     assert "FileNotFoundError" in out.err
     entry = json.loads(log_path.read_text())
     assert entry["submission_id"] == "sub-1"
-    assert entry["models"] is None and entry["combined"] is None
+    assert entry["models"] is None and entry["submitted_blend"] is None
+    assert entry["gate"]["passed"] is True
     run_dir = next(p for p in log_path.parent.iterdir() if p.is_dir())
     assert json.loads((run_dir / "gate.json").read_text())["passed"] is True
 
@@ -122,4 +123,5 @@ def test_a_gate_failure_still_exits_2_and_is_logged_before_any_upload(live, monk
     assert "submit" not in events
     entry = json.loads(log_path.read_text())
     assert entry["submission_id"] is None
-    assert entry["combined"] is not None
+    assert entry["gate"]["passed"] is False and entry["gate"]["threshold"] == 2.0
+    assert entry["raw_blend"] is not None
