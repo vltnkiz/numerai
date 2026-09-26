@@ -61,7 +61,9 @@ def make_dataset(
     rng = np.random.default_rng(seed + 3)
     for frame in (train, validation):
         noise = rng.normal(scale=noise_scale, size=len(frame)) if noise_scale else 0.0
-        frame["target"] = frame[signal_column].astype(float) + noise
+        # Both fit targets, and no generic `target` alias: nothing may read one.
+        frame["target_ender_20"] = frame[signal_column].astype(float) + noise
+        frame["target_ender_60"] = frame["target_ender_20"]
 
     return Dataset(train=train, validation=validation, live=live, feature_columns=FEATURE_COLUMNS)
 
@@ -107,6 +109,7 @@ def predict_column_spec(name: str, features: str, column: str, *, negated: bool 
     return ModelSpec(
         name=name,
         features=features,
+        target="target_ender_20",
         trainer="predict_negated_column" if negated else "predict_column",
         params={"column": column},
     )

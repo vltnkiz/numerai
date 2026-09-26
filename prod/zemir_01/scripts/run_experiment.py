@@ -55,7 +55,6 @@ def main() -> None:
     dataset = download(
         config.data_version,
         run_columns(config, strategy, feature_sets),
-        target_column=config.target_column,
     )
     result = run_pipeline(
         config,

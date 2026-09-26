@@ -88,7 +88,7 @@ def _validation(eras: range) -> pd.DataFrame:
             "era": [f"{era:04d}" for era in eras],
             "data_type": "validation",
             "feature_a": [0.5] * len(eras),
-            "target": [0.5] * len(eras),
+            "target_ender_60": [0.5] * len(eras),
         },
         index=pd.Index([f"id{era}" for era in eras], name="id"),
     )
@@ -165,9 +165,9 @@ def test_a_download_that_is_not_a_readable_parquet_never_replaces_the_old_copy(d
 
 def test_a_download_missing_the_target_never_replaces_the_old_copy(datasets_dir):
     path = _cache_validation(datasets_dir, _validation(range(575, 580)), age_days=8)
-    napi = FakeNumerAPI(_validation(range(575, 581)).drop(columns="target"))
+    napi = FakeNumerAPI(_validation(range(575, 581)).drop(columns="target_ender_60"))
 
-    with pytest.warns(RuntimeWarning, match="target"):
+    with pytest.warns(RuntimeWarning, match="target_ender_60"):
         assert not refresh_validation("5.3", napi=napi, now=NOW)
 
     assert _eras_on_disk(path) == 5
