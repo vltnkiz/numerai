@@ -101,9 +101,11 @@ job 3–5 h late, after weekday staking had closed.
   Dry runs never shut down.
 - **Failure issues:** any failure opens a GitHub issue titled
   `Live run failed: <type> (round N)`, with the log tail. A repeat for the same
-  type and round comments on the existing issue. Exit codes 2–5 from
+  type and round comments on the existing issue. Exit codes 2–6 from
   `run_pipeline.py` name the type (gate, round not open, memory, round
-  changed); anything else is a crash.
+  changed, submitted but scoring after the submission failed); anything else
+  is a crash. Exit 6 means the upload went through: the score log still gets
+  its entry, with the artifacts `null`.
 - **Logs:** each invocation writes `runs/scheduled/<utc stamp>/run.log` and
   `pip_freeze.txt`. Dependencies aren't locked, so the freeze is how version
   drift is traced.
@@ -199,7 +201,7 @@ CONTEXT.md, "Explanation"). It is gain/weight scale only; there is no SHAP.
 ### What it measures, and why those metrics
 
 Numerai pays `0.75 * corr20 + 2.25 * mmc20` — **MMC is weighted three times
-CORR**. `score_validation`'s plain Spearman is not a payout metric, so the
+CORR**. Plain Spearman (the legacy `summarize_era_spearman`) is not a payout metric, so the
 harness uses `numerai-tools`, Numerai's own reference implementation, for both:
 
 - **`mean_corr`** — `numerai_corr` per era over the full validation span.
