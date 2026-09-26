@@ -76,6 +76,7 @@ def live(tmp_path, monkeypatch, fake_trainers):
     monkeypatch.setattr(script, "record_round_outcome", lambda *a, **k: events.append("record_outcome"))
     monkeypatch.setattr(script, "load_meta_model", load_meta_model)
     monkeypatch.setattr(script, "score_run", score_run)
+    monkeypatch.setattr(script, "refresh_validation", lambda version: events.append("refresh_validation"))
     monkeypatch.setattr(script, "append_score_log", partial(script.append_score_log, log_path=log_path))
     monkeypatch.setattr(script, "load_numerai_models", lambda: {"zemir_01": "model-id"})
     monkeypatch.setattr(
@@ -97,6 +98,7 @@ def test_everything_recorded_only_runs_after_the_upload(live):
         "load_meta_model(refresh=True)",
         "score_run",
         "update_live_scores(['zemir_01'])",
+        "refresh_validation",
     ]
     entry = json.loads(log_path.read_text())
     assert entry["submission_id"] == "sub-1"
@@ -133,6 +135,7 @@ def test_a_gate_failure_still_exits_2_and_is_logged_before_any_upload(live, monk
     assert script.main() == script.EXIT_GATE_FAILED
 
     assert "submit" not in events
+    assert events[-1] == "refresh_validation"
     entry = json.loads(log_path.read_text())
     assert entry["submission_id"] is None
     assert entry["gate"]["passed"] is False and entry["gate"]["threshold"] == 2.0
@@ -161,3 +164,14 @@ def test_a_gate_failure_still_fetches_the_live_scores(live, monkeypatch):
     assert script.main() == script.EXIT_GATE_FAILED
 
     assert "update_live_scores(['zemir_01'])" in events
+
+
+def test_a_round_change_skips_the_validation_refresh(live, monkeypatch):
+    """The wrapper reruns at once for the new round; a 5.6 GB download must not delay it."""
+    script, events, log_path = live
+    new_round = Round(number=2, open_time=datetime.now(timezone.utc), close_staking_time=None)
+    monkeypatch.setattr(script, "fetch_current_round", lambda napi: new_round)
+
+    assert script.main() == script.EXIT_ROUND_CHANGED
+
+    assert "submit" not in events and "refresh_validation" not in events

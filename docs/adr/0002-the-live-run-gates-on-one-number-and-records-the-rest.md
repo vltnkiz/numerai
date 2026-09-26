@@ -76,5 +76,10 @@ fails, the submission stands and the run exits 6.
   It exists only so the raw blend's Spearman series continues through the
   schema 1 entries. Once the 365-day prune has removed the last schema 1
   entry, delete it. Until then, nothing new is measured on it (issue #96).
+- **Amended 2026-09-26:** the live run now refreshes `validation.parquet`
+  weekly, so the gate's frame grows past the 655 eras every schema 1 entry was
+  measured on. The Spearman series continues only approximately, and nothing
+  is done to preserve it: fresh data won over continuity. Where an exact
+  comparison matters, recompute both sides on the current copy.
 
 See issues #94, #95, #96, #97 and #98.
