@@ -176,7 +176,7 @@ if ($DryRun) {
 }
 
 # Whatever the pipeline's outcome - a gate failure still appends its scores (issue #68).
-# live_scores.jsonl is Numerai's per-round record (docs/adr/0003); it may not exist
+# live_scores.jsonl is Numerai's per-round record (issue #106); it may not exist
 # yet, and `git add` of a missing path fails, so it is added only once it does.
 $records = @($scoreLog) + @($liveScores | Where-Object { Test-Path (Join-Path $repo $_) })
 git add -- $records 2>$null

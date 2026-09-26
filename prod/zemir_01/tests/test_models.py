@@ -39,7 +39,7 @@ def frame_and_array(n_rows: int = 12) -> tuple[pd.DataFrame, np.ndarray]:
 def fit_data():
     dataset = make_dataset(n_train_eras=6, rows_per_era=20, noise_scale=0.5)
     train = dataset.train
-    return train[FEATURE_COLUMNS], train["target"], train["era"], dataset.validation
+    return train[FEATURE_COLUMNS], train["target_ender_20"], train["era"], dataset.validation
 
 
 # --- how an estimator is fed ------------------------------------------------------------

@@ -201,7 +201,6 @@ def main() -> None:
             config.feature_set,
             "train",
             feature_names=columns,
-            target_column=config.target_column,
         ),
         load_validation=partial(
             load_split,
@@ -209,13 +208,12 @@ def main() -> None:
             config.feature_set,
             "validation",
             feature_names=columns,
-            target_column=config.target_column,
         ),
     )
     frame = result.predictions
     print(f"run_id: {run_id}")
     print(f"  rows: {len(frame)}  eras: {frame['era'].nunique()}")
-    print(f"  models: {[c for c in frame.columns if c not in ('era', 'target')]}")
+    print(f"  models: {[c for c in frame.columns if c != 'era']}")
     print(f"  cache: {result.predictions_path}")
 
 

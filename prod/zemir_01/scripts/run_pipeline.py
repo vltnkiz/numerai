@@ -9,10 +9,15 @@ Started by prod/zemir_01/scheduling/Invoke-ZemirLiveRun.ps1 (issue #69), which
 maps the exit codes below to failure issues. An invocation with nothing to do
 exits 0.
 
-Takes no strategy argument: `PRODUCTION_STRATEGY` is the single line that
-decides what production ships. A flag here would be a second place that
-decision could be made, and the two could silently disagree — see
-docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md.
+Takes no strategy argument, and must not grow one (issue #78):
+`PRODUCTION_STRATEGY` is the single line that decides what production ships.
+A flag here, even one defaulting to it, is a second place that decision can be
+made, and the two can silently disagree. That is how the scheduled task came
+to pass `--model ensemble` for months while `config.py` claimed production was
+linear only (#74). scripts/run_experiment.py and scripts/fit_harness.py keep
+their `--strategy` flag because they never submit: trying another strategy is
+their whole job. Shipping another one is an edit to `PRODUCTION_STRATEGY`,
+reviewed and in `git log`.
 
 Usage:
   python scripts/run_pipeline.py
@@ -73,7 +78,7 @@ EXIT_POST_SUBMISSION_SCORING_FAILED = 6
 def record_live_scores() -> None:
     """Update live_scores.jsonl from Numerai and print its headline. Never fails the run.
 
-    Numerai's own per-round scores, the only live ones (docs/adr/0003). A
+    Numerai's own per-round scores, the only live ones (#106). A
     fetch that fails leaves the record as it was, and tomorrow's run catches up.
     """
     try:
@@ -115,7 +120,6 @@ def main() -> int:
     dataset = download(
         config.data_version,
         run_columns(config, PRODUCTION_STRATEGY, feature_sets),
-        target_column=config.target_column,
     )
     result = run_pipeline(
         config,
@@ -193,7 +197,7 @@ def main() -> int:
     # that needs history, which a gate-only run would never accumulate.
     append_score_log(
         run_id=result.run_id,
-        target_column=config.target_column,
+        fit_targets={spec.name: spec.target for spec in PRODUCTION_STRATEGY.models},
         gate=gate,
         scores=scores,
         submission_id=submission.submission_id if submission else None,

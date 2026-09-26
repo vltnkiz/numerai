@@ -5,11 +5,14 @@ import pandas as pd
 import pytest
 
 from zemir.scoring import (
+    PAYOUT_MULTIPLIERS,
+    VALIDATION_PAYOUT_PROXY,
     PredictionSanityError,
     era_max_feature_corr,
     era_mmc,
     era_numerai_corr,
     era_spearman,
+    proxy_lead_interval,
     rank_normalize,
     score_predictions,
     summarize_era_scores,
@@ -75,7 +78,9 @@ def _synthetic_era_spearman() -> pd.Series:
     eras = np.repeat([f"{i:04d}" for i in range(40)], 50)
     target = rng.normal(size=2000)
     prediction = target * 0.05 + rng.normal(size=2000)
-    return era_spearman(pd.DataFrame({"era": eras, "target": target, "prediction": prediction}))
+    return era_spearman(
+        pd.DataFrame({"era": eras, "target": target, "prediction": prediction}), target_col="target"
+    )
 
 
 def test_summarize_era_spearman_holds_the_retired_score_validation_arithmetic():
@@ -128,7 +133,8 @@ def test_the_two_vocabularies_report_different_numbers_under_the_same_names():
                     "target": frame["target"],
                     "prediction": one["a"],
                 }
-            )
+            ),
+            target_col="target",
         )
     )
     paid = summarize_era_scores(
@@ -215,6 +221,83 @@ def test_score_predictions_measures_mmc_over_the_window_and_corr_over_everything
     assert list(scores.summary["eras"]) == [12, 12]
     assert list(scores.summary["mmc_eras"]) == [6, 6]
     assert list(scores.summary.index) == ["a", "b"]
+
+
+def test_the_proxy_prices_the_windows_corr_and_mmc_at_numerais_current_multipliers():
+    """`3 * CORR60 + 15 * MMC60` from round 1343 (#105), both halves over the meta-model window."""
+    f = _paid_fixture()
+
+    summary = score_predictions(
+        f["predictions"], f["target"], f["era"], meta_model=f["meta_model"], features=f["features"]
+    ).summary
+
+    assert PAYOUT_MULTIPLIERS == {"corr60": 3.0, "mmc60": 15.0}
+    assert VALIDATION_PAYOUT_PROXY == "validation_payout_proxy_60"
+    pd.testing.assert_series_equal(
+        summary[VALIDATION_PAYOUT_PROXY],
+        3.0 * summary["mean_corr_window"] + 15.0 * summary["mean_mmc"],
+        check_names=False,
+    )
+
+
+def _lead_fixture(n_eras: int = 48, gap: float = 0.01) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rng = np.random.default_rng(3)
+    eras = pd.Index([f"{i:04d}" for i in range(n_eras)], name="era")
+    corr = pd.DataFrame(
+        {"base": rng.normal(0.01, 0.02, n_eras), "better": rng.normal(0.01 + gap, 0.02, n_eras)},
+        index=eras,
+    )
+    mmc = corr * 0.1
+    return corr, mmc
+
+
+def test_the_proxy_lead_is_zero_for_the_baseline_and_its_interval_brackets_every_lead():
+    corr, mmc = _lead_fixture()
+
+    leads = proxy_lead_interval(corr, mmc, "base")
+
+    assert leads.loc["base"].tolist() == [0.0, 0.0, 0.0]
+    assert (leads["lead_low"] <= leads["lead"]).all() and (leads["lead"] <= leads["lead_high"]).all()
+    window_proxy = 3.0 * corr + 15.0 * mmc
+    assert leads.loc["better", "lead"] == pytest.approx(
+        window_proxy["better"].mean() - window_proxy["base"].mean()
+    )
+
+
+def test_the_proxy_lead_interval_is_measured_over_the_meta_model_window_only():
+    corr, mmc = _lead_fixture()
+    window = mmc.iloc[24:]
+
+    leads = proxy_lead_interval(corr, window, "base")
+
+    window_proxy = 3.0 * corr.iloc[24:] + 15.0 * window
+    assert leads.loc["better", "lead"] == pytest.approx(
+        window_proxy["better"].mean() - window_proxy["base"].mean()
+    )
+
+
+def test_resampling_overlapping_eras_together_widens_the_interval():
+    """Eras that share returns are not independent draws; blocks keep them together."""
+    rng = np.random.default_rng(5)
+    n_eras = 96
+    # A lead that drifts slowly, the way overlapping 60-day targets make it.
+    drift = np.repeat(rng.normal(0, 0.02, n_eras // 12), 12)
+    eras = pd.Index([f"{i:04d}" for i in range(n_eras)], name="era")
+    corr = pd.DataFrame({"base": np.zeros(n_eras), "other": drift}, index=eras)
+    mmc = corr * 0.0
+
+    single = proxy_lead_interval(corr, mmc, "base", block=1).loc["other"]
+    blocked = proxy_lead_interval(corr, mmc, "base", block=12).loc["other"]
+
+    assert blocked["lead_high"] - blocked["lead_low"] > single["lead_high"] - single["lead_low"]
+
+
+def test_the_proxy_lead_interval_is_the_same_on_every_run():
+    corr, mmc = _lead_fixture()
+
+    pd.testing.assert_frame_equal(
+        proxy_lead_interval(corr, mmc, "base"), proxy_lead_interval(corr, mmc, "base")
+    )
 
 
 def test_score_predictions_writes_nothing(tmp_path, monkeypatch):

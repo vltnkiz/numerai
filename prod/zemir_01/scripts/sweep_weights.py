@@ -3,7 +3,7 @@
 
 The reusable half of #30's deliverable: given any cached fit (from
 scripts/fit_harness.py), sweep how much weight each model gets in the blend
-and rank by the validation payout proxy. Reused whenever a model joins, leaves, or the fit changes
+and rank by the validation payout proxy, beside production's own row. Reused whenever a model joins, leaves, or the fit changes
 — not a one-off for linear vs era_boost.
 
 Usage:
@@ -20,21 +20,14 @@ from pathlib import Path
 import pandas as pd
 
 from zemir.config import weight_sweep
-from zemir.harness import HARNESS_DIR, PREDICTIONS_FILENAME, load_fit_record, score_configs
-from zemir.scoring import VALIDATION_PAYOUT_PROXY
-
-REPORTED_COLUMNS = [
-    "eras",
-    "mean_corr",
-    "sharpe",
-    "smart_sharpe",
-    "mmc_eras",
-    "mean_corr_window",
-    "mean_mmc",
-    "mmc_sharpe",
-    "max_feature_corr",
-    VALIDATION_PAYOUT_PROXY,
-]
+from zemir.harness import (
+    HARNESS_DIR,
+    PREDICTIONS_FILENAME,
+    load_fit_record,
+    ranked_table,
+    score_configs,
+    with_baseline,
+)
 
 
 def latest_cache(harness_dir: Path) -> Path:
@@ -61,12 +54,14 @@ def main() -> None:
         resolution=args.resolution,
         neutralization_proportion=args.proportion,
     )
+    strategies, baseline_problem = with_baseline(strategies, record)
     result = score_configs(strategies, run_dir=run_dir)
 
-    ranked = result.summary.sort_values(VALIDATION_PAYOUT_PROXY, ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):
         print(f"cache: {run_dir}\n")
-        print(ranked[REPORTED_COLUMNS].to_string(float_format=lambda v: f"{v:.6f}"))
+        print(ranked_table(result).to_string(float_format=lambda v: f"{v:.6f}"))
+    if baseline_problem is not None:
+        print(f"\nBASELINE UNAVAILABLE: this cache cannot express PRODUCTION_STRATEGY: {baseline_problem}")
     print(f"\nwritten to {run_dir}")
 
 

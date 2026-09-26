@@ -8,7 +8,9 @@ import pytest
 
 from zemir.config import LIVE, PRODUCTION_STRATEGY
 from zemir.harness import (
+    BASELINE_ROW,
     PREDICTIONS_FILENAME,
+    REPORTED_COLUMNS,
     NoPersistedModels,
     UnscoreableStrategy,
     explain_models,
@@ -16,9 +18,12 @@ from zemir.harness import (
     load_fit_record,
     load_models,
     rank_feature_exposure,
+    ranked_table,
     score_configs,
     unscoreable_reason,
+    with_baseline,
 )
+from zemir.scoring import SCORING_TARGET, VALIDATION_PAYOUT_PROXY
 from zemir.strategy import BlendSpec, ModelSpec, Neutralization, Strategy
 
 from factories import FEATURE_SETS, make_dataset
@@ -28,7 +33,7 @@ from factories import FEATURE_SETS, make_dataset
 # no speed reason left to fake it now that `fit_validation_predictions` takes
 # a real `Strategy` rather than an injectable `build_trainers` callable.
 STRATEGY = Strategy(
-    models=(ModelSpec(name="linear", features="medium", trainer="ols"),),
+    models=(ModelSpec(name="linear", features="medium", target="target_ender_20", trainer="ols"),),
     blend=BlendSpec(),
 )
 
@@ -64,7 +69,8 @@ def test_fit_validation_predictions_writes_the_cache_without_touching_the_networ
 
     assert result.predictions_path.exists()
     assert (result.run_dir / "fit_config.json").exists()
-    assert set(result.predictions.columns) >= {"era", "target", "linear"}
+    # Predictions and nothing they are scored against: `score_configs` reads that (#105).
+    assert list(result.predictions.columns) == ["era", "linear"]
 
 
 def test_fit_validation_predictions_calls_load_train_before_load_validation(tmp_path):
@@ -111,8 +117,8 @@ def test_fit_validation_predictions_fits_two_specs_at_different_widths(tmp_path)
     load_train, load_validation, _ = _loaders(dataset)
     strategy = Strategy(
         models=(
-            ModelSpec(name="linear_narrow", features="narrow", trainer="ols"),
-            ModelSpec(name="linear_wide", features="medium", trainer="ols"),
+            ModelSpec(name="linear_narrow", features="narrow", target="target_ender_20", trainer="ols"),
+            ModelSpec(name="linear_wide", features="medium", target="target_ender_20", trainer="ols"),
         ),
         blend=BlendSpec(),
     )
@@ -136,10 +142,11 @@ def test_fit_validation_predictions_fits_two_specs_at_different_widths(tmp_path)
 
 TWO_MODELS = Strategy(
     models=(
-        ModelSpec(name="linear", features="medium", trainer="ols"),
+        ModelSpec(name="linear", features="medium", target="target_ender_20", trainer="ols"),
         ModelSpec(
             name="era_boost",
             features="medium",
+            target="target_ender_20",
             trainer="xgboost",
             params={"num_iters": 1, "trees_per_step": 3, "batch_rows": 25},
         ),
@@ -271,6 +278,12 @@ def scoring_env(monkeypatch):
     )
     monkeypatch.setattr("zemir.harness.load_validation_features", load_features)
     monkeypatch.setattr("zemir.harness.load_meta_model", lambda version, **_: meta_model)
+    monkeypatch.setattr(
+        "zemir.harness.load_scoring_target",
+        lambda version, *, eras=None, **_: validation.loc[
+            validation["era"].isin(eras) if eras is not None else validation.index, SCORING_TARGET
+        ],
+    )
 
 
 def _blend(weights=None, neutralization=None):
@@ -328,7 +341,7 @@ def test_score_configs_refuses_a_strategy_fitted_differently_from_the_cache(tmp_
 
 def test_score_configs_refuses_a_model_the_cache_never_fitted(tmp_path, scoring_env):
     _, fitted = _fit(tmp_path)
-    ghost = Strategy(models=(ModelSpec(name="ghost", features="medium", trainer="ols"),), blend=_blend())
+    ghost = Strategy(models=(ModelSpec(name="ghost", features="medium", target="target_ender_20", trainer="ols"),), blend=_blend())
 
     with pytest.raises(UnscoreableStrategy, match=r"\['ghost'\] were not fitted"):
         score_configs({"g": ghost}, run_dir=fitted.run_dir)
@@ -366,7 +379,13 @@ def test_a_cache_with_no_recorded_strategy_is_scored_by_model_name_and_labelled_
     assert [spec.name for spec in record.strategy.models] == ["linear", "era_boost"]  # STRATEGIES order
 
     # Fit fields cannot be held to a record that does not exist — even ones that differ from what was fitted.
-    ridge = ModelSpec(name="linear", features="medium", trainer="ridge", params={"alpha": 1.0})
+    ridge = ModelSpec(
+        name="linear",
+        features="medium",
+        target="target_ender_20",
+        trainer="ridge",
+        params={"alpha": 1.0},
+    )
     result = score_configs({"row": Strategy(models=(ridge,), blend=_blend())}, run_dir=fitted.run_dir)
 
     assert list(result.summary.index) == ["row"]
@@ -436,6 +455,113 @@ def test_a_strategy_equal_in_fit_fields_to_the_cache_is_expressible_whatever_it_
     assert unscoreable_reason(swept, load_fit_record(fitted.run_dir)) is None
 
 
+# --- fit targets and the scoring target (#105) ------------------------------------------------
+
+
+def test_score_configs_refuses_a_strategy_fitted_on_another_target(tmp_path, scoring_env):
+    _, fitted = _fit(tmp_path)
+    linear, era_boost = TWO_MODELS.models
+    longer = replace(TWO_MODELS, models=(replace(linear, target="target_ender_60"), era_boost))
+
+    with pytest.raises(UnscoreableStrategy, match=r"linear\.target"):
+        score_configs({"other": longer}, run_dir=fitted.run_dir)
+
+
+def test_a_cache_from_before_fit_targets_were_recorded_is_scored_and_says_so(tmp_path, scoring_env):
+    """Stage 1 of #105 rescores exactly such a cache: its target is unknown, so it is not checked."""
+    _, fitted = _fit(tmp_path)
+    path = fitted.run_dir / "fit_config.json"
+    fit = json.loads(path.read_text())
+    for model in fit["strategy"]["models"]:
+        del model["target"]
+    path.write_text(json.dumps(fit))
+
+    record = load_fit_record(fitted.run_dir)
+    score_configs({"row": _row()}, run_dir=fitted.run_dir)
+
+    assert record.verified and not record.targets_recorded
+    written = json.loads((fitted.run_dir / "scoring_strategies.json").read_text())
+    assert written["fit_fields"].startswith("verified except target")
+
+
+def test_score_configs_scores_against_the_scoring_target_read_now_not_one_in_the_cache(
+    tmp_path, scoring_env, monkeypatch
+):
+    """A cache holds no target, so moving the scoring target moves every row without a refit."""
+    _, fitted = _fit(tmp_path)
+    before = score_configs({"row": _row()}, run_dir=fitted.run_dir).summary.loc["row", "mean_corr"]
+
+    validation = make_dataset().validation
+    monkeypatch.setattr(
+        "zemir.harness.load_scoring_target",
+        lambda version, *, eras=None, **_: -validation[SCORING_TARGET],
+    )
+    after = score_configs({"row": _row()}, run_dir=fitted.run_dir).summary.loc["row", "mean_corr"]
+
+    assert before > 0
+    assert after == pytest.approx(-before)
+
+
+def test_rows_the_scoring_target_does_not_cover_are_left_out_of_the_score(
+    tmp_path, scoring_env, monkeypatch
+):
+    _, fitted = _fit(tmp_path)
+    validation = make_dataset().validation
+    last_era = validation["era"].max()
+    covered = validation.loc[validation["era"] != last_era, SCORING_TARGET]
+    monkeypatch.setattr("zemir.harness.load_scoring_target", lambda version, **_: covered)
+
+    result = score_configs({"row": _row()}, run_dir=fitted.run_dir)
+
+    assert result.summary.loc["row", "eras"] == validation["era"].nunique() - 1
+
+
+# --- the baseline row and its lead (#105) ----------------------------------------------------
+
+
+def test_with_baseline_adds_production_only_when_the_cache_can_express_it(tmp_path, scoring_env):
+    _, fitted = _fit(tmp_path)
+    rows = {"row": _row()}
+
+    added, problem = with_baseline(rows, load_fit_record(fitted.run_dir))
+    assert added == rows and "fitted differently" in problem
+
+    _make_legacy(fitted.run_dir)
+    added, problem = with_baseline(rows, load_fit_record(fitted.run_dir))
+    assert problem is None
+    assert added == {**rows, BASELINE_ROW: PRODUCTION_STRATEGY}
+
+
+def test_ranked_table_ranks_on_the_proxy_and_prints_each_rows_lead_over_production(
+    tmp_path, scoring_env
+):
+    _, fitted = _fit(tmp_path)
+    scores = score_configs(
+        {
+            "row": _row(neutralization=Neutralization(0.5, "medium")),
+            BASELINE_ROW: _row(),
+        },
+        run_dir=fitted.run_dir,
+    )
+
+    table = ranked_table(scores)
+
+    assert list(table.columns) == [*REPORTED_COLUMNS, "lead", "lead_low", "lead_high"]
+    assert table[VALIDATION_PAYOUT_PROXY].is_monotonic_decreasing
+    assert table.loc[BASELINE_ROW, ["lead", "lead_low", "lead_high"]].tolist() == [0.0, 0.0, 0.0]
+    assert table.loc["row", "lead"] == pytest.approx(
+        table.loc["row", VALIDATION_PAYOUT_PROXY] - table.loc[BASELINE_ROW, VALIDATION_PAYOUT_PROXY]
+    )
+
+
+def test_ranked_table_without_production_has_no_lead_columns(tmp_path, scoring_env):
+    _, fitted = _fit(tmp_path)
+
+    table = ranked_table(score_configs({"row": _row()}, run_dir=fitted.run_dir))
+
+    assert list(table.columns) == REPORTED_COLUMNS
+
+
 def test_rank_feature_exposure_ranks_the_features_a_blend_leans_on(tmp_path, scoring_env):
     _, fitted = _fit(tmp_path)
 
@@ -480,7 +606,7 @@ def test_a_live_runs_submitted_blend_row_is_the_harness_row_for_the_same_strateg
     `combined_neutralized` row and the harness's row for that strategy agree
     exactly in every column the live run records, and the gate's number is
     that row's `mean_corr`. The harness's one extra column is its ranking
-    proxy, which a live run leaves out (docs/adr/0003).
+    proxy, which a live run leaves out (#106).
     """
     from zemir.scoring import VALIDATION_PAYOUT_PROXY
     import zemir.harness as harness_module

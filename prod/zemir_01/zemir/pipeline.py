@@ -17,6 +17,8 @@ from zemir.data import Dataset, scoring_window
 from zemir.fitting import fit_strategy
 from zemir.models import FittedModel
 from zemir.scoring import (
+    LEGACY_SPEARMAN_TARGET,
+    SCORING_TARGET,
     VALIDATION_PAYOUT_PROXY,
     EraSpearmanScore,
     PredictionScores,
@@ -39,8 +41,9 @@ SCORE_LOG_PATH = REPO_ROOT / "prod" / "zemir_01" / "score_log.jsonl"
 # isn't worth the code.
 RETENTION_DAYS = 365
 # Issue #98: the history log's entry shape. Schema 1 (#68) carries no marker.
-# Schema 3 drops `payout` from every `paid` row (docs/adr/0003).
-SCORE_LOG_SCHEMA = 3
+# Schema 3 drops `payout` from every `paid` row (#106). Schema 4 replaces
+# `target_column` with `scoring_target` and `fit_targets` (#105).
+SCORE_LOG_SCHEMA = 4
 # The paid row's two counts, recorded as integers rather than floats.
 _INTEGER_SCORE_COLUMNS = {"eras", "mmc_eras"}
 _RUN_ID_FORMAT = "%Y%m%dT%H%M%SZ"
@@ -72,7 +75,8 @@ class PipelineResult:
 
     `validation_predictions` holds one column per model plus `RAW_BLEND` and
     `SUBMITTED_BLEND`, on `validation`'s index. `gate_corr` is the submitted
-    blend's mean **Numerai CORR** over the whole of `validation`.
+    blend's mean **Numerai CORR** against `SCORING_TARGET` over the whole of
+    `validation`.
     """
 
     run_id: str
@@ -92,9 +96,12 @@ class RunScores:
     `PipelineResult.validation_predictions`: the composition, and the files, a
     harness scoring run produces, less `VALIDATION_PAYOUT_PROXY`. That column
     ranks harness rows; on a live run it would only be misread as what Numerai
-    pays, which comes from Numerai (`zemir.live_scores`, docs/adr/0003). `spearman` holds the legacy **Spearman
-    correlation** triple for each model and the raw blend, kept only so the
-    history log's older entries stay comparable (issue #96).
+    pays, which comes from Numerai (`zemir.live_scores`, #106). Apart from that
+    one column, keep this table and the harness's identical: a live submitted
+    blend row is comparable with a harness row only while they measure the
+    same columns (#102). `spearman` holds the legacy **Spearman correlation**
+    triple for each model and the raw blend, against `LEGACY_SPEARMAN_TARGET`,
+    kept only so the history log's older entries stay comparable (issue #96).
     """
 
     paid: PredictionScores
@@ -258,7 +265,7 @@ def run_pipeline(
     gate_corr = float(
         era_numerai_corr(
             validation_predictions[[SUBMITTED_BLEND]],
-            validation_df["target"],
+            validation_df[SCORING_TARGET],
             validation_df["era"],
         )[SUBMITTED_BLEND].mean()
     )
@@ -304,6 +311,7 @@ def record_gate(result: PipelineResult, *, threshold: float) -> dict:
     """
     record = {
         "metric": "numerai_corr",
+        "target": SCORING_TARGET,
         "artifact": SUBMITTED_BLEND,
         "eras": int(result.validation["era"].nunique()),
         "mean_corr": result.gate_corr,
@@ -334,7 +342,7 @@ def score_run(
     predictions = result.validation_predictions
     paid = score_predictions(
         predictions.astype("float32"),
-        validation["target"],
+        validation[SCORING_TARGET],
         validation["era"],
         meta_model=meta_model,
         features=validation[scoring_universe],
@@ -342,7 +350,10 @@ def score_run(
     paid = replace(paid, summary=paid.summary.drop(columns=VALIDATION_PAYOUT_PROXY))
     spearman = {
         name: summarize_era_spearman(
-            era_spearman(validation[["era", "target"]].assign(prediction=predictions[name]))
+            era_spearman(
+                validation[["era", LEGACY_SPEARMAN_TARGET]].assign(prediction=predictions[name]),
+                target_col=LEGACY_SPEARMAN_TARGET,
+            )
         )
         for name in predictions.columns
         if name != SUBMITTED_BLEND
@@ -418,6 +429,8 @@ def _write_run_config(
         **asdict(config),
         "models": sorted(spec.name for spec in strategy.models),
         "model_features": {spec.name: spec.features for spec in strategy.models},
+        "model_targets": {spec.name: spec.target for spec in strategy.models},
+        "scoring_target": SCORING_TARGET,
         "model_weights": dict(blend.weights) if blend.weights is not None else None,
         "neutralization_proportion": (
             blend_neutralization.proportion if blend_neutralization is not None else 0.0
@@ -455,7 +468,7 @@ def _run_id_age_days(run_id: str, *, now: datetime) -> float | None:
 def append_score_log(
     *,
     run_id: str,
-    target_column: str,
+    fit_targets: Mapping[str, str],
     gate: Mapping[str, object],
     scores: RunScores | None,
     submission_id: str | None,
@@ -480,8 +493,13 @@ def append_score_log(
     `submitted_blend` — and within each by vocabulary: `paid` is the
     artifact's harness row, `mmc_eras` included, so MMC carries its window;
     `spearman` is the legacy triple, present only where schema 1 recorded one.
-    Schema 3 is schema 2 without `payout` in `paid` (docs/adr/0003); schema 2
-    entries keep theirs as written. An entry with no `schema` key is schema 1:
+    Schema 3 is schema 2 without `payout` in `paid` (#106); schema 2 entries
+    keep theirs as written. Schema 4 is schema 3 with `target_column` replaced
+    by `scoring_target`, what every `paid` row and the gate are measured
+    against, and `fit_targets`, what each model was fitted on (#105): from
+    schema 4 on, `paid` is no longer comparable with an earlier entry's, which
+    was measured against `target_ender_20`. `spearman` still is, because it
+    stays on `LEGACY_SPEARMAN_TARGET`. An entry with no `schema` key is schema 1:
     `{run_id, target_column, models, combined, submission_id}`, Spearman only,
     `combined` being the raw blend. Those are left exactly as written.
     """
@@ -508,7 +526,8 @@ def append_score_log(
         {
             "schema": SCORE_LOG_SCHEMA,
             "run_id": run_id,
-            "target_column": target_column,
+            "scoring_target": SCORING_TARGET,
+            "fit_targets": dict(fit_targets),
             "gate": dict(gate),
             "models": (
                 {name: {"paid": _paid(name), "spearman": _spearman(name)} for name in models}

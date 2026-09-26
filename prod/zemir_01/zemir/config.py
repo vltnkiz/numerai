@@ -41,26 +41,32 @@ XGBOOST_HYPERPARAMS: Mapping[str, object] = {
     "random_state": 0,
 }
 
-# The dataset's generic `target` alias is not guaranteed to track whichever
-# target Numerai currently pays on — v5.3's `target` aliases `target_ender_60`,
-# while Numerai has scored payouts against `target_ender_20` specifically since
-# 2026-01-01 (confirmed via Numerai's own announcement, not the dataset's own
-# metadata). Era-wise Spearman between the two over the 647-era validation
-# window is only 0.465 (issue #64) — a real divergence, not noise. See
-# CONTEXT.md's `target` alias / payout target distinction.
-TARGET_COLUMN = "target_ender_20"
+# What every shipped model is fitted on. Numerai paid on `target_ender_20` from
+# 2026-01-01 until round 1343 moved payout to `target_ender_60` (#105), and
+# every choice below was measured on models fitted on it. Whether fitting on
+# `target_ender_60` scores better against the new payout target is the
+# harness's question to answer, model by model (`ModelSpec.target`), not a
+# default to assume. Never the dataset's generic `target` alias: v5.3's
+# aliases `target_ender_60`, and it moves between dataset versions (#64).
+ENDER_20 = "target_ender_20"
 
 # Read only by scripts/run_pipeline.py — the one entrypoint that submits.
 SUBMISSION_MODEL_SLOT = "zemir_01"
 # The submission gate's floor on the submitted blend's mean Numerai CORR over
-# all of validation (issue #97). The gate passes when `gate_corr >= 0`, so it
-# catches a sign flip and nothing else. That was chosen on purpose (issue #95):
-# a floor of zero depends on no typical value, so it cannot go stale as the
-# fit or the data changes. The cost is that a pure-noise fit passes about half
-# the time. Production reads 0.011590 here (issue #97; the 0.010368 in issue
-# #95 described an older fit). The worst legitimate octile measured on that
-# older fit is +0.002964. Choosing between strategies is the harness's job, not
-# this gate's.
+# all of validation, against `SCORING_TARGET` (issues #97, #105). The gate
+# passes when `gate_corr >= 0`, so it catches a sign flip and nothing else.
+# That was chosen on purpose (issue #95): a floor of zero depends on no typical
+# value, so it cannot go stale as the fit, the data or the scoring target
+# changes. The cost is that a pure-noise fit passes about half the time.
+# Production read 0.011590 here against `target_ender_20` (issue #97). Reopen
+# the floor once the history log holds enough entries to derive a rolling one
+# from its own series: that is the one mechanism left for catching a gradual
+# decline. Choosing between strategies is the harness's job, not this gate's.
+#
+# The gate reads CORR, not payout, on purpose (#97): MMC and the payout proxy
+# exist only over the meta-model window, which is shorter than validation and
+# grows about an era a week (#101). A payout gate would gate on the noisiest
+# number, over the shortest span, on a span that moves between runs.
 MIN_VALIDATION_MEAN_CORR = 0.0
 
 # Issue #33: round open/close wall-clock timing is not a documented Numerai
@@ -108,12 +114,6 @@ class PipelineConfig:
     # ~9.7% behind `medium` on payout (#48), as was a linear-at-`all` /
     # era_boost-at-`medium` hybrid (#60).
     feature_set: str = "medium"
-    # Overwrites the dataset's `target` alias with this named column right at
-    # load (`zemir.data._read_parquet`) — every downstream site still reads
-    # plain `"target"` unchanged. Issue #64: switched from the alias's
-    # untouched default (`target_ender_60` in v5.3) to the actual payout
-    # target, `target_ender_20`.
-    target_column: str = TARGET_COLUMN
     max_eras: int | None = None  # None = every era
 
 
@@ -142,6 +142,11 @@ def smoke(strategy: Strategy) -> Strategy:
     return replace(strategy, models=models)
 
 
+# Every measurement cited from here down was taken on models fitted on, and
+# scored against, `target_ender_20`, ranked on the retired 20-day proxy. Numerai
+# pays on `target_ender_60` from round 1343, so each is due a re-measure on
+# `validation_payout_proxy_60`, and any change ships as its own PR (#105).
+#
 # Measured by scripts/sweep_weights.py against runs/harness/20260825T194439Z-ensemble/
 # (653 validation eras, neutralization_proportion fixed at 0.95 per issue #29) — issue #30.
 # Picked on mean_corr/sharpe/smart_sharpe, not the payout argmax: pure linear
@@ -190,7 +195,7 @@ ENSEMBLE_NEUTRALIZERS: tuple[str, ...] = MEDIUM_FEATURE_EXPOSURE_RANKING[:_NEUTR
 # duplicated here.
 STRATEGIES: Mapping[str, Strategy] = {
     "linear": Strategy(
-        models=(ModelSpec(name="linear", features="medium", trainer="ols"),),
+        models=(ModelSpec(name="linear", features="medium", target=ENDER_20, trainer="ols"),),
         blend=BlendSpec(neutralization=Neutralization(0.95, "medium")),
     ),
     "era_boost": Strategy(
@@ -198,6 +203,7 @@ STRATEGIES: Mapping[str, Strategy] = {
             ModelSpec(
                 name="era_boost",
                 features="medium",
+                target=ENDER_20,
                 trainer="xgboost",
                 params=XGBOOST_HYPERPARAMS,
             ),
@@ -206,10 +212,11 @@ STRATEGIES: Mapping[str, Strategy] = {
     ),
     "zemir_01": Strategy(
         models=(
-            ModelSpec(name="linear", features="medium", trainer="ols"),
+            ModelSpec(name="linear", features="medium", target=ENDER_20, trainer="ols"),
             ModelSpec(
                 name="era_boost",
                 features="medium",
+                target=ENDER_20,
                 trainer="xgboost",
                 params=XGBOOST_HYPERPARAMS,
             ),
