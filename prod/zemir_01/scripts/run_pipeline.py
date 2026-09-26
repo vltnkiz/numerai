@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import sys
+import traceback
 from datetime import datetime, timezone
 
 from numerapi import NumerAPI
@@ -32,8 +33,18 @@ from zemir.config import (
     PRODUCTION_STRATEGY,
     SUBMISSION_MODEL_SLOT,
 )
-from zemir.data import download, resolve_feature_sets
-from zemir.pipeline import append_score_log, run_pipeline, submit_predictions
+from zemir.data import download, load_meta_model, resolve_feature_sets
+from zemir.pipeline import (
+    append_score_log,
+    feature_set_names,
+    format_gate,
+    format_run_scores,
+    record_gate,
+    run_columns,
+    run_pipeline,
+    score_run,
+    submit_predictions,
+)
 from zemir.schedule import (
     GATE_FAILED,
     SUBMITTED,
@@ -44,13 +55,16 @@ from zemir.schedule import (
     require_available_memory,
     round_to_run,
 )
-from zemir.strategy import required_columns
 
 # Read by Invoke-ZemirLiveRun.ps1. Anything else non-zero is a crash.
 EXIT_GATE_FAILED = 2
 EXIT_ROUND_NOT_OPEN = 3
 EXIT_INSUFFICIENT_MEMORY = 4
 EXIT_ROUND_CHANGED = 5
+# The run got as far as it was going to (submitted, or stopped by the gate or
+# a round change), but scoring it afterwards failed. Never means the upload
+# failed: an upload failure raises before this is reachable (issue #97).
+EXIT_POST_SUBMISSION_SCORING_FAILED = 6
 
 
 def main() -> int:
@@ -77,10 +91,12 @@ def main() -> int:
         return EXIT_INSUFFICIENT_MEMORY
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    feature_sets = resolve_feature_sets(config.data_version, PRODUCTION_STRATEGY.feature_set_names)
+    feature_sets = resolve_feature_sets(
+        config.data_version, feature_set_names(config, PRODUCTION_STRATEGY)
+    )
     dataset = download(
         config.data_version,
-        required_columns(PRODUCTION_STRATEGY, feature_sets),
+        run_columns(config, PRODUCTION_STRATEGY, feature_sets),
         target_column=config.target_column,
     )
     result = run_pipeline(
@@ -92,17 +108,13 @@ def main() -> int:
     )
 
     print(f"run_id: {result.run_id}")
-    for name, score in result.validation_scores.items():
-        print(f"  {name}: mean_corr={score.mean_corr:.4f}  sharpe={score.sharpe:.4f}")
-    print(
-        f"combined validation mean_corr: {result.combined_validation_score.mean_corr:.4f}  "
-        f"sharpe: {result.combined_validation_score.sharpe:.4f}"
-    )
     print(f"live predictions: {len(result.live_predictions)} rows")
 
     # The gate guards submission, so it sits with submission — not inside the
-    # pipeline, which cannot submit and so has nothing to stop.
-    below_gate = result.combined_validation_score.mean_corr < MIN_VALIDATION_MEAN_CORR
+    # pipeline, which cannot submit and so has nothing to stop. Its number is
+    # the only score computed before the upload (issue #97).
+    below_gate = not record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)
+    print(format_gate(result, threshold=MIN_VALIDATION_MEAN_CORR))
     # A new round opening mid-fit would receive predictions made from the
     # previous round's live features. Not a final outcome: the wrapper reruns
     # for the new round. No current round at all (a between-rounds gap or an
@@ -132,23 +144,44 @@ def main() -> int:
                 f"submission_id={submission.submission_id}"
             )
 
+    # Everything below is recorded, never decided on, so nothing in it may
+    # take the submission down with it (issue #97). The meta model is
+    # refreshed here, after the upload, so the harness reads a copy no older
+    # than today's (issue #101). A failed refresh already falls back to the
+    # cached copy; only the no-cache case raises.
+    scores = None
+    try:
+        meta_model = load_meta_model(config.data_version, refresh=True)
+        scores = score_run(
+            result,
+            meta_model=meta_model,
+            scoring_universe=feature_sets[config.feature_set],
+        )
+        print(format_run_scores(scores))
+    except Exception:
+        traceback.print_exc()
+        print(
+            "ERROR: post-submission scoring failed. "
+            + (
+                f"The submission itself went through (submission_id={submission.submission_id})."
+                if submission
+                else "Nothing was submitted, for the reason given below, not because of this."
+            )
+        )
+
     # Logged regardless of the gate outcome (issue #68): the gate only catches
     # a run crashing through the floor, not one quietly declining above it —
     # that needs history, which a gate-only run would never accumulate.
     append_score_log(
         run_id=result.run_id,
         target_column=config.target_column,
-        validation_scores=result.validation_scores,
-        combined_validation_score=result.combined_validation_score,
+        spearman=scores.spearman if scores else None,
         submission_id=submission.submission_id if submission else None,
     )
     if below_gate:
         # Deterministic fit on unchanged data: a retry would fail identically.
         record_round_outcome(live_round.number, GATE_FAILED, run_id=result.run_id)
-        print(
-            f"validation mean_corr {result.combined_validation_score.mean_corr:.4f} < "
-            f"MIN_VALIDATION_MEAN_CORR {MIN_VALIDATION_MEAN_CORR:.4f} — not submitting"
-        )
+        print("not submitting: below the gate")
         return EXIT_GATE_FAILED
     if round_changed:
         print(
@@ -156,6 +189,8 @@ def main() -> int:
             "predictions into the next round"
         )
         return EXIT_ROUND_CHANGED
+    if scores is None:
+        return EXIT_POST_SUBMISSION_SCORING_FAILED
     return 0
 
 

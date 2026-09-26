@@ -32,6 +32,14 @@ _Avoid_: assuming a strategy's name implies it is what production currently subm
 Removing a chosen proportion of a prediction's linear component explained by a chosen set of features, era by era. A strategy can apply one to each model's predictions before they are blended, and one to the blend afterwards; each carries its own strength and names its own features, and a stage with none applies nothing. There is no default feature set: what a neutralization removes exposure to is always written down where it is asked for, so the live run and the harness cannot disagree about what "all features" means (see [issue #88](https://github.com/vltnkiz/numerai/issues/88)).
 _Avoid_: reading "no neutralization" and "neutralize against everything" as the same absence — the first is a stage that applies nothing, the second is a set that must be named.
 
+**Raw blend** (`combined`):
+The strategy's models' predictions rank-blended by their weights, before any **neutralization** at all. Never submitted. Scored only so each run can be compared with the history log's older entries, which were all taken on it (see [issue #97](https://github.com/vltnkiz/numerai/issues/97)).
+_Avoid_: reading a `combined` score as a measurement of what was submitted.
+
+**Submitted blend** (`combined_neutralized`):
+The blend after every neutralization the strategy applies (each model's, then the blend's), which is what the live run uploads. The submission gate reads its **Numerai CORR** over validation. It is also the one row of a live run that measures the same thing as a harness row for the same strategy, so it is the row to compare with a harness table (see [issue #97](https://github.com/vltnkiz/numerai/issues/97)).
+_Avoid_: gating on, or comparing against the harness with, the **raw blend**. The two differ by every neutralization the strategy applies.
+
 **Fitted model**:
 The result of fitting a `ModelSpec`: a trained model bound to the exact feature columns it was fitted on, so it predicts from any frame containing them and cannot be handed the wrong ones silently. The spec is the recipe; the fitted model is what it produced, and carries no memory of which spec that was (see [issue #84](https://github.com/vltnkiz/numerai/issues/84)). The harness keeps each one beside the predictions it produced, so a question about a fit is answered from the saved model rather than a refit (see [issue #87](https://github.com/vltnkiz/numerai/issues/87)).
 _Avoid_: "fitted spec" (the retired name — it held a spec nothing read, and was never a spec).

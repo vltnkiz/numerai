@@ -52,13 +52,15 @@ TARGET_COLUMN = "target_ender_20"
 
 # Read only by scripts/run_pipeline.py — the one entrypoint that submits.
 SUBMISSION_MODEL_SLOT = "zemir_01"
-# A sanity floor, not a profitability gate (issue #32, per #34): catches a
-# clearly broken run (near-zero or negative rank correlation — a bug, not
-# weak signal) without tripping on a genuinely bad-but-real week. Set below
-# the worst legitimate window measured so far — the harness's recent-octile
-# low of 0.0019 (issue #28) — with margin, since that figure is on
-# numerai_corr, not this gate's spearman-based mean_corr.
-MIN_VALIDATION_MEAN_CORR = 0.001
+# The submission gate's floor on the submitted blend's mean Numerai CORR over
+# all of validation (issue #97). The gate passes when `gate_corr >= 0`, so it
+# catches a sign flip and nothing else. That was chosen on purpose (issue #95):
+# a floor of zero depends on no typical value, so it cannot go stale as the
+# fit or the data changes. The cost is that a pure-noise fit passes about half
+# the time. Production reads 0.010368 here. The worst legitimate octile
+# measured is +0.002964. Choosing between strategies is the harness's job, not
+# this gate's.
+MIN_VALIDATION_MEAN_CORR = 0.0
 
 # Issue #33: round open/close wall-clock timing is not a documented Numerai
 # guarantee (their docs disclaim an upper bound on open-time slippage), so
