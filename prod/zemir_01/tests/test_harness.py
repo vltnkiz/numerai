@@ -478,8 +478,11 @@ def test_a_live_runs_submitted_blend_row_is_the_harness_row_for_the_same_strateg
     The same strategy, fitted by the same real trainers on the same data, once
     by the harness and once by the live pipeline. The live run's
     `combined_neutralized` row and the harness's row for that strategy agree
-    exactly in every column, and the gate's number is that row's `mean_corr`.
+    exactly in every column the live run records, and the gate's number is
+    that row's `mean_corr`. The harness's one extra column is its ranking
+    proxy, which a live run leaves out (docs/adr/0003).
     """
+    from zemir.scoring import VALIDATION_PAYOUT_PROXY
     import zemir.harness as harness_module
     from zemir.pipeline import SUBMITTED_BLEND, run_pipeline, score_run
 
@@ -507,7 +510,11 @@ def test_a_live_runs_submitted_blend_row_is_the_harness_row_for_the_same_strateg
 
     # NaN would compare equal to NaN and prove nothing.
     assert harness.summary.loc["production"].notna().all()
+    harness_row = harness.summary.loc["production"]
+    assert list(harness_row.index) == [*scores.paid.summary.columns, VALIDATION_PAYOUT_PROXY]
     pd.testing.assert_series_equal(
-        scores.paid.summary.loc[SUBMITTED_BLEND], harness.summary.loc["production"], check_names=False
+        scores.paid.summary.loc[SUBMITTED_BLEND],
+        harness_row.drop(VALIDATION_PAYOUT_PROXY),
+        check_names=False,
     )
     assert live.gate_corr == harness.summary.loc["production", "mean_corr"]

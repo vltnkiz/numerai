@@ -24,6 +24,7 @@ import sys
 import traceback
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 from numerapi import NumerAPI
 
 from zemir.config import (
@@ -34,11 +35,13 @@ from zemir.config import (
     SUBMISSION_MODEL_SLOT,
 )
 from zemir.data import download, load_meta_model, resolve_feature_sets
+from zemir.live_scores import format_resolved, summarize_resolved, update_record
 from zemir.pipeline import (
     append_score_log,
     feature_set_names,
     format_gate,
     format_run_scores,
+    load_numerai_models,
     record_gate,
     run_columns,
     run_pipeline,
@@ -65,6 +68,21 @@ EXIT_ROUND_CHANGED = 5
 # a round change), but scoring it afterwards failed. Never means the upload
 # failed: an upload failure raises before this is reachable (issue #97).
 EXIT_POST_SUBMISSION_SCORING_FAILED = 6
+
+
+def record_live_scores() -> None:
+    """Update live_scores.jsonl from Numerai and print its headline. Never fails the run.
+
+    Numerai's own per-round scores, the only live ones (docs/adr/0003). A
+    fetch that fails leaves the record as it was, and tomorrow's run catches up.
+    """
+    try:
+        load_dotenv()
+        rows = update_record(load_numerai_models())
+        print(format_resolved(summarize_resolved(rows)))
+    except Exception:
+        traceback.print_exc()
+        print("WARNING: fetching Numerai's live scores failed; live_scores.jsonl is unchanged")
 
 
 def main() -> int:
@@ -180,6 +198,7 @@ def main() -> int:
         scores=scores,
         submission_id=submission.submission_id if submission else None,
     )
+    record_live_scores()
     if below_gate:
         # Deterministic fit on unchanged data: a retry would fail identically.
         record_round_outcome(live_round.number, GATE_FAILED, run_id=result.run_id)

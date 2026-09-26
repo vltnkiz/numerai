@@ -27,6 +27,7 @@ from zemir.harness import (
     rank_feature_exposure,
     score_configs,
 )
+from zemir.scoring import VALIDATION_PAYOUT_PROXY
 
 REPORTED_COLUMNS = [
     "eras",
@@ -38,7 +39,7 @@ REPORTED_COLUMNS = [
     "mean_mmc",
     "mmc_sharpe",
     "max_feature_corr",
-    "payout",
+    VALIDATION_PAYOUT_PROXY,
 ]
 
 
@@ -71,7 +72,7 @@ def main() -> None:
     )
     result = score_configs(strategies, run_dir=run_dir)
 
-    ranked = result.summary.sort_values("payout", ascending=False)
+    ranked = result.summary.sort_values(VALIDATION_PAYOUT_PROXY, ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):
         print(f"cache: {run_dir}\n")
         print("feature exposure ranking (top 10, mean |corr| across eras):")
