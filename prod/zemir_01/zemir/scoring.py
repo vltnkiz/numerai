@@ -19,15 +19,16 @@ def era_spearman(
     """Plain per-era Spearman correlation — *not* Numerai's paid CORR.
 
     The paid measure is `era_numerai_corr`, and the two are not
-    interchangeable: on the same production run this reports 0.0164 against
-    the paid 0.0104, because it ranks differently *and* is taken on the raw
-    blend rather than the neutralized one.
+    interchangeable: on the same production run this reports 0.0164 on the
+    raw blend against a paid 0.0116 on the submitted blend, so the gap is one
+    of metric *and* of artifact.
 
-    Kept for exactly one reason: `score_log.jsonl` has recorded `mean_corr`,
-    `sharpe` and `smart_sharpe` in this vocabulary since issue #68, and
-    `RETENTION_DAYS = 365` keeps those entries comparable for a year after the
-    live run switches to the paid metrics. Nothing new should be measured on
-    it (issue #96).
+    Kept for exactly one reason: `score_log.jsonl`'s schema 1 entries recorded
+    `mean_corr`, `sharpe` and `smart_sharpe` in this vocabulary since issue
+    #68, and the raw blend's Spearman series continues through schema 2 so
+    they stay comparable. Once the prune has removed the last schema 1 entry,
+    delete this and `summarize_era_spearman` (docs/adr/0002). Nothing new
+    should be measured on it (issue #96).
     """
     corrs = df.groupby(era_col).apply(
         lambda d: spearmanr(d[prediction_col], d[target_col])[0]

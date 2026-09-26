@@ -21,8 +21,16 @@ The correlation Numerai pays on, measured per era: prediction and payout target 
 _Avoid_: writing or reading a bare `mean_corr` without saying which vocabulary produced it — **Spearman correlation** reports a column of that exact name holding a different number.
 
 **Spearman correlation**:
-Plain per-era rank correlation between a prediction and the target. Numerai prices nothing on it. It survives in this project for one reason: the cross-run history log has recorded `mean_corr`, `sharpe` and `smart_sharpe` in this vocabulary since [issue #68](https://github.com/vltnkiz/numerai/issues/68), and those entries stay comparable for a year after the live run moves to the paid metrics. On the same production run it reads 0.0164 where **Numerai CORR** reads 0.0104 — it ranks differently *and* has been taken on the raw blend rather than the neutralized one, so the gap is a difference of metric **and** of artifact (see [issue #96](https://github.com/vltnkiz/numerai/issues/96)).
-_Avoid_: comparing a Spearman number against a Numerai CORR number, and measuring anything new on Spearman at all.
+Plain per-era rank correlation between a prediction and the target. Numerai prices nothing on it. It survives in this project for one reason: the **history log** recorded `mean_corr`, `sharpe` and `smart_sharpe` in this vocabulary from [issue #68](https://github.com/vltnkiz/numerai/issues/68) until the live run moved to the **paid metrics**, and the live run keeps recording it on the **raw blend** until the last of those entries ages out (see `docs/adr/0002-the-live-run-gates-on-one-number-and-records-the-rest.md`). On the same production run it reads 0.0164 on the raw blend where **Numerai CORR** reads 0.0116 on the **submitted blend**, so the gap is a difference of metric **and** of artifact (see [issue #96](https://github.com/vltnkiz/numerai/issues/96)).
+_Avoid_: "validation score" (the retired name, from the days it gated the submission), comparing a Spearman number against a Numerai CORR number, and measuring anything new on Spearman at all.
+
+**Paid metrics**:
+The three numbers Numerai pays on, and the vocabulary the harness ranks strategies in: **Numerai CORR**; MMC, what a prediction adds to the target's correlation beyond what the meta model's own prediction already accounts for; and payout, `0.75·CORR + 2.25·MMC`, with both halves taken over the **meta-model window**. The gate reads only the first. Payout is recorded and never gates (see `docs/adr/0002-the-live-run-gates-on-one-number-and-records-the-rest.md`).
+_Avoid_: "score" or "validation score" for any one of them. Say which metric.
+
+**Meta-model window**:
+The validation eras for which Numerai has published its meta model's predictions: the only eras over which MMC, and therefore payout, can be measured. Shorter than validation, and it grows by about one era a week as the shared copy is refreshed, but it never rewrites an era already in it (see [issue #94](https://github.com/vltnkiz/numerai/issues/94) and [issue #101](https://github.com/vltnkiz/numerai/issues/101)). Numerai CORR over all of validation does not depend on it.
+_Avoid_: comparing MMC or payout between two measurements taken over different windows. A longer window is not a better score, only a different one; check `mmc_eras` first.
 
 **Strategy**:
 A named list of `ModelSpec` plus one `BlendSpec` — which models, blended how. Named `zemir_NN` when it is a shipped or ship-candidate blend; named after its single model otherwise (`linear`, `era_boost`). A generation label, **not** a submission slot: a strategy can be fitted and measured before, or without, ever shipping (see [issue #74](https://github.com/vltnkiz/numerai/issues/74)).
@@ -39,6 +47,10 @@ _Avoid_: reading a `combined` score as a measurement of what was submitted.
 **Submitted blend** (`combined_neutralized`):
 The blend after every neutralization the strategy applies (each model's, then the blend's), which is what the live run uploads. The submission gate reads its **Numerai CORR** over validation. It is also the one row of a live run that measures the same thing as a harness row for the same strategy, so it is the row to compare with a harness table (see [issue #97](https://github.com/vltnkiz/numerai/issues/97)).
 _Avoid_: gating on, or comparing against the harness with, the **raw blend**. The two differ by every neutralization the strategy applies.
+
+**History log** (`score_log.jsonl`):
+One entry per live run, kept for a year, recording what that run scored. Entries from before the live run moved to the **paid metrics** are **Spearman correlation** on the **raw blend** and nothing else. Later entries carry the paid metrics of each model, the raw blend and the submitted blend, and keep the Spearman figures beside them only so the old series continues (see [issue #98](https://github.com/vltnkiz/numerai/issues/98)).
+_Avoid_: comparing anything in the history log with a harness table except the **submitted blend**'s paid metrics. That includes every older entry's `mean_corr`: it has the same name as a harness column but it is a different metric on a different artifact.
 
 **Fitted model**:
 The result of fitting a `ModelSpec`: a trained model bound to the exact feature columns it was fitted on, so it predicts from any frame containing them and cannot be handed the wrong ones silently. The spec is the recipe; the fitted model is what it produced, and carries no memory of which spec that was (see [issue #84](https://github.com/vltnkiz/numerai/issues/84)). The harness keeps each one beside the predictions it produced, so a question about a fit is answered from the saved model rather than a refit (see [issue #87](https://github.com/vltnkiz/numerai/issues/87)).

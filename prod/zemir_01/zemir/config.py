@@ -57,8 +57,9 @@ SUBMISSION_MODEL_SLOT = "zemir_01"
 # catches a sign flip and nothing else. That was chosen on purpose (issue #95):
 # a floor of zero depends on no typical value, so it cannot go stale as the
 # fit or the data changes. The cost is that a pure-noise fit passes about half
-# the time. Production reads 0.010368 here. The worst legitimate octile
-# measured is +0.002964. Choosing between strategies is the harness's job, not
+# the time. Production reads 0.011590 here (issue #97; the 0.010368 in issue
+# #95 described an older fit). The worst legitimate octile measured on that
+# older fit is +0.002964. Choosing between strategies is the harness's job, not
 # this gate's.
 MIN_VALIDATION_MEAN_CORR = 0.0
 
