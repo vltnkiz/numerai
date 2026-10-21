@@ -12,6 +12,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from numerapi import NumerAPI
 
+from zemir.scoring import SCORING_TARGET
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DATASETS_DIR = REPO_ROOT / "datasets"
 # Numerai resolves about one validation era a week, so a daily 5.6 GB pull
@@ -37,9 +39,7 @@ def _download_file(napi: NumerAPI, version: str, filename: str, *, force: bool) 
     return dest_path
 
 
-def _read_parquet(
-    path: Path, feature_columns: list[str], *, target_column: str = "target"
-) -> pd.DataFrame:
+def _read_parquet(path: Path, feature_columns: list[str]) -> pd.DataFrame:
     """Every non-feature column plus the requested features, and nothing else.
 
     Releases pyarrow's pool before returning: `pd.read_parquet` decodes
@@ -55,19 +55,14 @@ def _read_parquet(
     regardless of `max_eras`, and was quietly already part of the untruncated
     full-scale peak).
 
-    `target_column` overwrites the dataset's generic `target` alias with a
-    named target column (e.g. `target_ender_20`) — every non-feature column is
-    already read above, so the named column is already present in `frame` and
-    this is a same-frame reassignment, not another read. The alias is *not*
-    guaranteed to track whichever target Numerai currently pays on (issue
-    #64: v5.3's `target` aliases `target_ender_60`, not the `target_ender_20`
-    Numerai has scored payouts against since 2026-01-01) — see CONTEXT.md.
+    Every named target column comes along with the other non-feature columns,
+    and nothing reads the dataset's generic `target` alias: a fit reads its
+    model's `ModelSpec.target`, and scoring reads `SCORING_TARGET`. The alias
+    is not guaranteed to track either (#64, #105) — see CONTEXT.md.
     """
     all_columns = pq.read_schema(path).names
     non_feature = [c for c in all_columns if not c.startswith("feature_")]
     frame = pd.read_parquet(path, columns=non_feature + feature_columns)
-    if target_column != "target" and "target" in frame.columns:
-        frame["target"] = frame[target_column]
     pa.default_memory_pool().release_unused()
     return frame
 
@@ -105,13 +100,13 @@ def last_eras(df: pd.DataFrame, n: int) -> pd.DataFrame:
 
 
 def scoring_window(df: pd.DataFrame, max_eras: int | None) -> pd.DataFrame:
-    """The target-bearing rows of `df`, restricted to its last `max_eras` eras.
+    """The validation rows that carry `SCORING_TARGET`, restricted to the last `max_eras` eras.
 
-    What every fit and every validation score is computed over — one
-    definition, so a train frame and a validation frame can never be
-    windowed differently.
+    What every validation score is computed over, in the live run and the
+    harness alike. A fit takes its own rows instead (`zemir.fitting.fit_rows`),
+    because what it needs is its model's target, not the scoring target.
     """
-    df = df.dropna(subset=["target"])
+    df = df.dropna(subset=[SCORING_TARGET])
     return df if max_eras is None else last_eras(df, max_eras)
 
 
@@ -121,7 +116,6 @@ def load_split(
     split: str,
     *,
     feature_names: list[str] | None = None,
-    target_column: str = "target",
     napi: NumerAPI | None = None,
 ) -> pd.DataFrame:
     """One dataset split ("train"/"validation"/"live"), and nothing else.
@@ -138,15 +132,13 @@ def load_split(
     issue #45's dead-column drop) straight through to the parquet read,
     rather than reading every column and dropping some afterward — dropping
     after the fact means briefly holding both the wide and narrow copies.
-
-    `target_column` is passed straight through to `_read_parquet` (issue #64).
     """
     napi = napi or NumerAPI()
     names = feature_names if feature_names is not None else feature_columns(
         version, feature_set, napi=napi
     )
     path = _download_file(napi, version, f"{split}.parquet", force=(split == "live"))
-    return _read_parquet(path, names, target_column=target_column)
+    return _read_parquet(path, names)
 
 
 def load_validation_features(
@@ -183,6 +175,23 @@ def load_validation_features(
     frame = pd.read_parquet(path, columns=["era", *columns], filters=filters)
     pa.default_memory_pool().release_unused()
     return frame
+
+
+def load_scoring_target(
+    version: str, *, eras: list[str] | None = None, napi: NumerAPI | None = None
+) -> pd.Series:
+    """Validation's `SCORING_TARGET`, by id, read when a cache is scored rather than stored in it.
+
+    A harness cache holds predictions and nothing it is scored against, so a
+    cache fitted before the scoring target moved can be rescored on the new one
+    without a refit, and cannot go stale when it moves again (#105). Rows
+    without a target are dropped.
+    """
+    napi = napi or NumerAPI()
+    path = _download_file(napi, version, "validation.parquet", force=False)
+    filters = [("era", "in", list(eras))] if eras is not None else None
+    frame = pd.read_parquet(path, columns=[SCORING_TARGET], filters=filters)
+    return frame[SCORING_TARGET].dropna()
 
 
 def load_meta_model(
@@ -236,7 +245,7 @@ def refresh_validation(
     reads features by id.
 
     Downloads to a staging file and swaps it in only once its footer reads
-    and carries `era` and `target`, because the next run reads this file
+    and carries `era` and `SCORING_TARGET`, because the next run reads this file
     *before* it uploads: a broken copy there would cost a submission. Staging
     leftovers are deleted first — numerapi resumes any `<dest>.temp` without
     checking that the server's file is still the same one, which would splice
@@ -257,7 +266,7 @@ def refresh_validation(
         (napi or NumerAPI()).download_dataset(
             f"v{version}/validation.parquet", dest_path=str(staging)
         )
-        missing = {"era", "target"} - set(pq.read_schema(staging).names)
+        missing = {"era", SCORING_TARGET} - set(pq.read_schema(staging).names)
         if missing:
             raise ValueError(f"downloaded copy lacks {sorted(missing)}")
         staging.replace(path)
@@ -277,7 +286,6 @@ def download(
     version: str,
     feature_names: list[str],
     *,
-    target_column: str = "target",
     napi: NumerAPI | None = None,
 ) -> Dataset:
     """All three splits at `feature_names` width.
@@ -295,10 +303,8 @@ def download(
     live_path = _download_file(napi, version, "live.parquet", force=True)
 
     return Dataset(
-        train=_read_parquet(train_path, feature_names, target_column=target_column),
-        validation=_read_parquet(
-            validation_path, feature_names, target_column=target_column
-        ),
-        live=_read_parquet(live_path, feature_names, target_column=target_column),
+        train=_read_parquet(train_path, feature_names),
+        validation=_read_parquet(validation_path, feature_names),
+        live=_read_parquet(live_path, feature_names),
         feature_columns=feature_names,
     )

@@ -3,7 +3,9 @@
 Everything `zemir.scoring` computes is a backtest over validation, and a fixed
 model scores the same eras identically every day, so none of it says what
 Numerai scored or pays. This module asks Numerai instead, and records per
-round exactly what it answers (see docs/adr/0003-live-scores-come-from-numerai.md).
+round exactly what it answers (#106). Numerai owns the payout formula and has
+changed it once already, so reading its multipliers per round is the only way
+the number stays right without anyone noticing a change.
 
 A round's scores move daily until it resolves, so the record keeps one row per
 (model, round), rewritten while the round is provisional and frozen once it has
@@ -18,7 +20,7 @@ clipping turn it into NMR.
 
 The two formulas' scores are on different scales, so no mean is taken over
 `payout_score`. Every round is also priced by the current formula,
-`REFERENCE_MULTIPLIERS`, as `reference_payout_score`: Numerai reports corr60
+`PAYOUT_MULTIPLIERS`, as `reference_payout_score`: Numerai reports corr60
 and mmc60 on the older rounds too, so the whole record is comparable on the
 one formula that matters from here on, and that is what the headline averages.
 """
@@ -33,6 +35,8 @@ from pathlib import Path
 
 from numerapi import NumerAPI
 
+from zemir.scoring import PAYOUT_MULTIPLIERS
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIVE_SCORES_PATH = REPO_ROOT / "prod" / "zemir_01" / "live_scores.jsonl"
 
@@ -40,9 +44,6 @@ LIVE_SCORES_PATH = REPO_ROOT / "prod" / "zemir_01" / "live_scores.jsonl"
 # of the payout formula, so the headline reads the same numbers the site does.
 CORR20 = "v2_corr20"
 MMC20 = "mmc"
-# The payout formula of rounds from 1343, as `round_model_performances_v2` lists
-# it. Update it when Numerai's listed multipliers change again.
-REFERENCE_MULTIPLIERS = {"corr60": 3.0, "mmc60": 15.0}
 
 
 def _float(value) -> float | None:
@@ -59,7 +60,8 @@ def fetch_rounds(model_id: str, *, napi: NumerAPI | None = None) -> list[dict]:
     `round_model_performances_v2` is deprecated in favour of
     `submission_scores`, but only it carries each round's payout multipliers
     and whether the round has resolved; `submission_scores`' `resolved` is per
-    daily score. Public data: no key needed.
+    daily score. So this stays until Numerai removes the endpoint, and
+    `numerapi` stays pinned below 4 (#106). Public data: no key needed.
     """
     napi = napi or NumerAPI()
     with warnings.catch_warnings():
@@ -95,7 +97,7 @@ def round_row(model: str, model_id: str, performance: Mapping) -> dict:
         "payout_factor": _float(performance.get("roundPayoutFactor")),
         "multipliers": multipliers,
         "payout_score": _price(scores, multipliers),
-        "reference_payout_score": _price(scores, REFERENCE_MULTIPLIERS),
+        "reference_payout_score": _price(scores, PAYOUT_MULTIPLIERS),
         "scores": scores,
         "percentiles": percentiles,
     }
@@ -104,7 +106,9 @@ def round_row(model: str, model_id: str, performance: Mapping) -> dict:
 def merge_rows(existing: Iterable[dict], fetched: Iterable[dict]) -> list[dict]:
     """The record after a fetch: fetched rows replace provisional ones, never resolved ones.
 
-    A row already recorded as resolved is kept exactly as written. Rows Numerai
+    A row already recorded as resolved is kept exactly as written, in the shape
+    it was written in: a change to the row shape needs a migration of the
+    resolved rows, or a reader that tolerates the old ones (#106). Rows Numerai
     no longer returns stay. Sorted by model, then round.
     """
     rows = {(row["model"], row["round"]): row for row in existing}
@@ -178,7 +182,7 @@ def summarize_resolved(rows: Iterable[dict]) -> list[ResolvedSummary]:
     return summaries
 
 
-_REFERENCE_LABEL = " + ".join(f"{m:g}*{name}" for name, m in REFERENCE_MULTIPLIERS.items())
+_REFERENCE_LABEL = " + ".join(f"{m:g}*{name}" for name, m in PAYOUT_MULTIPLIERS.items())
 
 
 def format_resolved(summaries: Iterable[ResolvedSummary]) -> str:

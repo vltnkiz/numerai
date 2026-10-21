@@ -32,10 +32,14 @@ class Recorder:
         self.frame_ids: dict[str, int] = {}
         self.refs: dict[str, weakref.ref] = {}
         self.dead_at_fit: dict[str, dict[str, bool]] = {}
+        self.eras: dict[str, list[str]] = {}
+        self.targets: dict[str, str] = {}
 
     def __call__(self, X, y, era, *, tag: str, column: str) -> FittedModel:
         self.events.append(f"fit:{tag}")
         self.columns[tag] = tuple(X.columns)
+        self.eras[tag] = sorted(era.unique(), key=int)
+        self.targets[tag] = y.name
         self.frame_ids[tag] = id(X)
         self.dead_at_fit[tag] = {t: ref() is None for t, ref in self.refs.items()}
         self.refs[tag] = weakref.ref(X)
@@ -55,9 +59,15 @@ def recorder(monkeypatch):
     return recorder
 
 
-def spec(tag: str, features: str, column: str = "feature_a") -> ModelSpec:
+def spec(
+    tag: str, features: str, column: str = "feature_a", target: str = "target_ender_20"
+) -> ModelSpec:
     return ModelSpec(
-        name=tag, features=features, trainer="record", params={"tag": tag, "column": column}
+        name=tag,
+        features=features,
+        target=target,
+        trainer="record",
+        params={"tag": tag, "column": column},
     )
 
 
@@ -122,7 +132,7 @@ def test_no_frame_outlives_the_fit(recorder):
 def test_the_wide_train_frame_is_gone_before_any_trainer_runs(monkeypatch):
     # Issue #47: a `train_df` still bound while the trainers run is a second
     # full-width copy live beside the one being fitted. Counted by looking for
-    # frames still carrying `target` at the train split's own length — the
+    # frames still carrying a target at the train split's own length — the
     # caller's `dataset.train` is the one legitimate survivor.
     dataset = make_dataset(n_train_eras=10, n_validation_eras=5, rows_per_era=20)
     seen: list[int] = []
@@ -132,13 +142,21 @@ def test_the_wide_train_frame_is_gone_before_any_trainer_runs(monkeypatch):
             sum(
                 1
                 for o in gc.get_objects()
-                if isinstance(o, pd.DataFrame) and "target" in o.columns and len(o) == len(dataset.train)
+                if isinstance(o, pd.DataFrame)
+                and "target_ender_20" in o.columns
+                and len(o) == len(dataset.train)
             )
         )
         return fitted_predicting(X, column)
 
     monkeypatch.setitem(TRAINERS, "counting", counting_trainer)
-    counting = ModelSpec(name="m", features="medium", trainer="counting", params={"column": "feature_a"})
+    counting = ModelSpec(
+        name="m",
+        features="medium",
+        target="target_ender_20",
+        trainer="counting",
+        params={"column": "feature_a"},
+    )
 
     fit_strategy(
         strategy_of(counting), lambda: dataset.train.copy(), feature_sets=FEATURE_SETS
@@ -176,11 +194,57 @@ def test_equal_width_specs_fit_in_declared_order(recorder):
 
 def test_only_target_bearing_rows_of_the_last_eras_are_fitted(recorder):
     dataset = make_dataset(n_train_eras=10, rows_per_era=20)
-    dataset.train.loc[dataset.train.index[:5], "target"] = None
+    dataset.train.loc[dataset.train.index[:5], "target_ender_20"] = None
 
     result = fit(strategy_of(spec("a", "medium")), dataset, max_eras=3)
 
-    assert result.train_eras == 3
+    assert result.train_eras == {"a": 3}
+
+
+# --- fit targets and the purge (#105) -------------------------------------------------------
+
+
+def test_a_fit_drops_the_last_eras_its_targets_horizon_overlaps(recorder):
+    # A 20-day target spans four weekly eras, so train's last four overlap validation.
+    dataset = make_dataset(n_train_eras=10)
+
+    result = fit(strategy_of(spec("a", "medium")), dataset)
+
+    assert recorder.eras["a"] == [f"{e:04d}" for e in range(1, 7)]
+    assert result.train_eras == {"a": 6}
+
+
+def test_each_model_fits_on_its_own_target_with_its_own_purge(recorder):
+    dataset = make_dataset(n_train_eras=20)
+    dataset.train["target_ender_60"] = -dataset.train["target_ender_20"]
+
+    result = fit(
+        strategy_of(
+            spec("short", "medium", target="target_ender_20"),
+            spec("long", "medium", target="target_ender_60"),
+        ),
+        dataset,
+    )
+
+    assert recorder.targets == {"short": "target_ender_20", "long": "target_ender_60"}
+    assert recorder.eras["short"][-1] == "0016"
+    assert recorder.eras["long"][-1] == "0008"
+    assert result.train_eras == {"short": 16, "long": 8}
+
+
+def test_a_target_with_no_known_horizon_fails_rather_than_guessing_a_purge(recorder):
+    dataset = make_dataset()
+    dataset.train["target_other_30"] = dataset.train["target_ender_20"]
+
+    with pytest.raises(KeyError, match="no known horizon"):
+        fit(strategy_of(spec("a", "medium", target="target_other_30")), dataset)
+
+
+def test_a_purge_that_leaves_no_eras_fails_loudly(recorder):
+    dataset = make_dataset(n_train_eras=10)
+
+    with pytest.raises(ValueError, match="no train eras left"):
+        fit(strategy_of(spec("a", "medium", target="target_ender_60")), dataset)
 
 
 def test_a_model_naming_an_unresolved_feature_set_fails_loudly(recorder):
@@ -196,8 +260,8 @@ def test_fit_order_does_not_change_what_a_model_learns():
     dataset = make_dataset()
     strategy = Strategy(
         models=(
-            ModelSpec(name="wide", features="medium", trainer="ols"),
-            ModelSpec(name="narrow", features="narrow", trainer="ols"),
+            ModelSpec(name="wide", features="medium", target="target_ender_20", trainer="ols"),
+            ModelSpec(name="narrow", features="narrow", target="target_ender_20", trainer="ols"),
         ),
         blend=BlendSpec(),
     )
@@ -223,7 +287,7 @@ def test_a_trainer_that_binds_its_model_to_other_columns_fails_loudly(monkeypatc
         return FittedModel(PredictColumn(0), ("feature_a",), dtype=np.float64)
 
     monkeypatch.setitem(TRAINERS, "misbound", fits_on_one_column)
-    misbound = ModelSpec(name="m", features="medium", trainer="misbound")
+    misbound = ModelSpec(name="m", features="medium", target="target_ender_20", trainer="misbound")
 
     with pytest.raises(ValueError, match="model 'm' was fitted on 1 columns that are not the 3"):
         fit(strategy_of(misbound), make_dataset())
@@ -233,4 +297,9 @@ def test_a_trainer_that_returns_a_bare_estimator_fails_loudly(monkeypatch):
     monkeypatch.setitem(TRAINERS, "bare", lambda X, y, era, **_: PredictColumn(0))
 
     with pytest.raises(TypeError, match="returned PredictColumn, not a FittedModel"):
-        fit(strategy_of(ModelSpec(name="m", features="medium", trainer="bare")), make_dataset())
+        fit(
+            strategy_of(
+                ModelSpec(name="m", features="medium", target="target_ender_20", trainer="bare")
+            ),
+            make_dataset(),
+        )

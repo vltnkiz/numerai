@@ -28,7 +28,7 @@ from zemir.strategy import BlendSpec, ModelSpec, Neutralization, Strategy
 
 def test_linear_strategy_matches_deleted_tables():
     assert STRATEGIES["linear"] == Strategy(
-        models=(ModelSpec(name="linear", features="medium", trainer="ols"),),
+        models=(ModelSpec(name="linear", features="medium", target="target_ender_20", trainer="ols"),),
         blend=BlendSpec(weights=None, neutralization=Neutralization(0.95, "medium")),
     )
 
@@ -39,6 +39,7 @@ def test_era_boost_strategy_matches_deleted_tables():
             ModelSpec(
                 name="era_boost",
                 features="medium",
+                target="target_ender_20",
                 trainer="xgboost",
                 params=XGBOOST_HYPERPARAMS,
             ),
@@ -51,10 +52,11 @@ def test_zemir_01_strategy_matches_deleted_ensemble_table():
     """`zemir_01` is `ensemble` under its new name — #74/#77's one renaming."""
     assert STRATEGIES["zemir_01"] == Strategy(
         models=(
-            ModelSpec(name="linear", features="medium", trainer="ols"),
+            ModelSpec(name="linear", features="medium", target="target_ender_20", trainer="ols"),
             ModelSpec(
                 name="era_boost",
                 features="medium",
+                target="target_ender_20",
                 trainer="xgboost",
                 params=XGBOOST_HYPERPARAMS,
             ),

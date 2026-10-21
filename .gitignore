@@ -1,4 +1,4 @@
-#Docs — local-only agent tooling, not versioned project docs (docs/adr/ IS tracked)
+#Docs — local-only agent tooling, not versioned project docs
 docs/agents/
 
 # Datasets (large, downloaded on demand by zemir/data.py)

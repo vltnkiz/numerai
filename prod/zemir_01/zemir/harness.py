@@ -16,9 +16,10 @@ Split in two stages, because fitting is the only expensive part:
    predictions, each row a `Strategy` scored through `zemir.blend`: the same
    transform the live run applies. Seconds, and repeatable without refitting.
 
-Anything that changes a *model* (hyperparameters, feature set, training eras)
-invalidates the cache and needs a new fit. Anything downstream of `.predict()`
-is free.
+Anything that changes a *model* (hyperparameters, feature set, fit target,
+training eras) invalidates the cache and needs a new fit. Anything downstream
+of `.predict()` is free, and so is the target it is scored against: a cache
+holds no target, and `score_configs` reads `SCORING_TARGET` when it scores.
 """
 
 from __future__ import annotations
@@ -31,9 +32,10 @@ from pathlib import Path
 import pandas as pd
 
 from zemir.blend import blend_strategies, combine_predictions
-from zemir.config import STRATEGIES, PipelineConfig
+from zemir.config import PRODUCTION_STRATEGY, STRATEGIES, PipelineConfig
 from zemir.data import (
     load_meta_model,
+    load_scoring_target,
     load_validation_features,
     resolve_feature_sets,
     scoring_window,
@@ -42,11 +44,14 @@ from zemir.fitting import fit_strategy
 from zemir.models import FittedModel
 from zemir.pipeline import RUNS_DIR, predict_each
 from zemir.scoring import (
+    VALIDATION_PAYOUT_PROXY,
     PredictionScores,
     era_feature_corr,
+    proxy_lead_interval,
     score_predictions,
 )
 from zemir.strategy import (
+    UNRECORDED_TARGET,
     BlendSpec,
     FeatureSets,
     ModelSpec,
@@ -59,6 +64,21 @@ from zemir.strategy import (
 HARNESS_DIR = RUNS_DIR / "harness"
 PREDICTIONS_FILENAME = "validation_predictions.parquet"
 MODELS_DIRNAME = "models"  # <run_dir>/models/<ModelSpec.name>/, one FittedModel.save each
+# The row that scores what production actually ships, under the same transform as every other row.
+BASELINE_ROW = "production"
+# What every sweep prints, best proxy first; `ranked_table` adds the lead columns.
+REPORTED_COLUMNS = [
+    "eras",
+    "mean_corr",
+    "sharpe",
+    "smart_sharpe",
+    "mmc_eras",
+    "mean_corr_window",
+    "mean_mmc",
+    "mmc_sharpe",
+    "max_feature_corr",
+    VALIDATION_PAYOUT_PROXY,
+]
 
 
 @dataclass
@@ -81,7 +101,8 @@ def fit_validation_predictions(
     """Fit `strategy`'s models and cache their raw validation predictions.
 
     The expensive stage. Writes `validation_predictions.parquet` (index `id`;
-    columns `era`, `target`, one per model) plus the `fit_config.json` that
+    columns `era` and one per model, over the rows that carry `SCORING_TARGET`)
+    plus the `fit_config.json` that
     produced it — a scoring run stamps that config onto its results so a
     comparison is never read against the wrong fit — and, under `models/`, each
     fitted model itself. The models are written the moment the fit returns, before
@@ -119,7 +140,7 @@ def fit_validation_predictions(
 
     predictions = predict_each(fit.models, validation_df)
 
-    frame = validation_df[["era", "target"]].copy()
+    frame = validation_df[["era"]].copy()
     for name, preds in predictions.items():
         frame[name] = preds.astype("float32")
 
@@ -199,8 +220,10 @@ class FitRecord:
 
     `verified` is whether that is a *record* or a reconstruction. A cache fitted
     since #74 stores the whole `Strategy`, and `check_scoreable` can then hold a
-    swept strategy's fit fields (`features`, `trainer`, `params`) to it — also
-    when the record predates `Neutralization`, since its fit fields are intact.
+    swept strategy's fit fields (`features`, `target`, `trainer`, `params`) to
+    it — also when the record predates `Neutralization`, since its fit fields
+    are intact. A record from before `ModelSpec.target` (#105) holds every fit
+    field but the target, which reads `UNRECORDED_TARGET` and is not checked.
     The oldest caches store only the model names, so `strategy` is rebuilt from
     `zemir.config.STRATEGIES` by name and nothing about how those models were
     fitted can be checked — the only claim is that the names are in the cache.
@@ -209,6 +232,12 @@ class FitRecord:
     strategy: Strategy
     feature_set: str
     verified: bool
+
+    @property
+    def targets_recorded(self) -> bool:
+        return self.verified and all(
+            spec.target != UNRECORDED_TARGET for spec in self.strategy.models
+        )
 
 
 class UnscoreableStrategy(ValueError):
@@ -229,6 +258,7 @@ def _recorded_strategy(fit: Mapping[str, object]) -> Strategy | None:
                 ModelSpec(
                     name=m["name"],
                     features=m["features"],
+                    target=UNRECORDED_TARGET,
                     trainer=m["trainer"],
                     params=dict(m["params"]),
                 )
@@ -268,6 +298,7 @@ def _fit_fields(spec: ModelSpec) -> dict[str, object]:
     # Through JSON so a tuple and the list it round-trips to compare equal.
     return {
         "features": spec.features,
+        "target": spec.target,
         "trainer": spec.trainer,
         "params": json.loads(json.dumps(dict(spec.params), sort_keys=True)),
     }
@@ -277,9 +308,10 @@ def check_scoreable(strategy: Strategy, record: FitRecord) -> None:
     """Raise `UnscoreableStrategy` unless `strategy` can be scored against this cache.
 
     Every model it names must have been fitted and — for a cache that recorded
-    its strategy — fitted the way the strategy says: same `features`, `trainer`
-    and `params`. Weights and neutralization are not checked, because they are
-    exactly what a rescore is for. Scoring a strategy whose `params` differ from
+    its strategy — fitted the way the strategy says: same `features`, `target`,
+    `trainer` and `params`. A cache recorded before fit targets were (#105) is
+    not held to `target`. Weights and neutralization are not checked, because
+    they are exactly what a rescore is for. Scoring a strategy whose `params` differ from
     the fit would report the cached model's numbers under the wrong description.
     """
     fitted = {spec.name: spec for spec in record.strategy.models}
@@ -297,6 +329,7 @@ def check_scoreable(strategy: Strategy, record: FitRecord) -> None:
             f"{spec.name}.{field}: {swept[field]!r} here, {cached[field]!r} in the cache"
             for field in swept
             if swept[field] != cached[field]
+            and not (field == "target" and cached[field] == UNRECORDED_TARGET)
         ]
     if differences:
         raise UnscoreableStrategy(
@@ -312,6 +345,40 @@ def unscoreable_reason(strategy: Strategy, record: FitRecord) -> str | None:
     except UnscoreableStrategy as exc:
         return str(exc)
     return None
+
+
+def with_baseline(
+    strategies: Mapping[str, Strategy], record: FitRecord
+) -> tuple[dict[str, Strategy], str | None]:
+    """`strategies` plus `PRODUCTION_STRATEGY` as `BASELINE_ROW`, or unchanged and the reason it cannot be scored here.
+
+    The baseline is `PRODUCTION_STRATEGY` itself, never a nearby row: a cache
+    that cannot express it says so rather than substituting one. A baseline
+    that quietly goes missing, or is swapped for a neighbour, is the defect the
+    old string constant was.
+    """
+    problem = unscoreable_reason(PRODUCTION_STRATEGY, record)
+    if problem is not None:
+        return dict(strategies), problem
+    return {**strategies, BASELINE_ROW: PRODUCTION_STRATEGY}, None
+
+
+def ranked_table(scores: PredictionScores) -> pd.DataFrame:
+    """`REPORTED_COLUMNS`, best `VALIDATION_PAYOUT_PROXY` first, with each row's lead over `BASELINE_ROW`.
+
+    The lead and its bootstrap interval (`proxy_lead_interval`) are there only
+    when the baseline was scored. They are reported, not applied: a sweep
+    ranks on the proxy, and whether a lead is worth shipping — its interval,
+    and whether the row also holds `mean_corr` over all of validation, which
+    the gate reads — is decided in the PR that would change `STRATEGIES`
+    (#105). Nothing ships from a table on its own.
+    """
+    table = scores.summary[REPORTED_COLUMNS]
+    if BASELINE_ROW in table.index:
+        table = table.join(
+            proxy_lead_interval(scores.corr_by_era, scores.mmc_by_era, BASELINE_ROW)
+        )
+    return table.sort_values(VALIDATION_PAYOUT_PROXY, ascending=False)
 
 
 def _load_cache_and_features(
@@ -390,6 +457,9 @@ def score_configs(
     the cache from its own `fit_config.json`, so a sweep can never be scored
     against the wrong features or the wrong meta model.
 
+    Every row is scored against `SCORING_TARGET`, read from validation now
+    rather than from the cache, over the cached rows that carry it (#105).
+
     The `max_feature_corr` diagnostic always measures exposure to the cache's
     whole `feature_set` regardless of what a strategy neutralized against — it
     is the total risk being reported on, not a number a subset gets to grade
@@ -406,6 +476,10 @@ def score_configs(
         run_dir, strategies
     )
     meta_model = load_meta_model(fit["data_version"])
+    target = load_scoring_target(fit["data_version"], eras=sorted(cache["era"].unique(), key=int))
+    scored = cache.index.intersection(target.index, sort=False)
+    if len(scored) < len(cache):
+        cache, features = cache.loc[scored], features.loc[scored]
 
     predictions = blend_strategies(strategies, cache, features, cache["era"], feature_sets).astype(
         "float32"
@@ -413,7 +487,7 @@ def score_configs(
 
     scores = score_predictions(
         predictions,
-        cache["target"],
+        target.loc[cache.index],
         cache["era"],
         meta_model=meta_model,
         features=features[scoring_universe],
@@ -430,6 +504,8 @@ def score_configs(
             {
                 "fit_fields": (
                     "verified"
+                    if record.targets_recorded
+                    else "verified except target: this cache predates recorded fit targets"
                     if record.verified
                     else "unverified: this cache predates recorded strategies"
                 ),

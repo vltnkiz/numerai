@@ -19,31 +19,17 @@ from pathlib import Path
 
 import pandas as pd
 
-from zemir.config import PRODUCTION_STRATEGY, scoring_sweep
+from zemir.config import scoring_sweep
 from zemir.harness import (
+    BASELINE_ROW,
     HARNESS_DIR,
     PREDICTIONS_FILENAME,
     load_fit_record,
+    ranked_table,
     score_configs,
-    unscoreable_reason,
+    with_baseline,
 )
 from zemir.scoring import VALIDATION_PAYOUT_PROXY
-
-# The row that scores what production actually ships, under the same transform as every other row.
-BASELINE_ROW = "production"
-
-REPORTED_COLUMNS = [
-    "eras",
-    "mean_corr",
-    "sharpe",
-    "smart_sharpe",
-    "mmc_eras",
-    "mean_corr_window",
-    "mean_mmc",
-    "mmc_sharpe",
-    "max_feature_corr",
-    VALIDATION_PAYOUT_PROXY,
-]
 
 
 def latest_cache(harness_dir: Path) -> Path:
@@ -60,26 +46,26 @@ def main() -> None:
 
     run_dir = HARNESS_DIR / args.run_id if args.run_id else latest_cache(HARNESS_DIR)
     record = load_fit_record(run_dir)
-    strategies = scoring_sweep(record.strategy, features=record.feature_set)
-    # The baseline is `PRODUCTION_STRATEGY` itself, never a nearby row: a cache that
-    # cannot express it says so below rather than substituting one.
-    baseline_problem = unscoreable_reason(PRODUCTION_STRATEGY, record)
-    if baseline_problem is None:
-        strategies[BASELINE_ROW] = PRODUCTION_STRATEGY
+    strategies, baseline_problem = with_baseline(
+        scoring_sweep(record.strategy, features=record.feature_set), record
+    )
     result = score_configs(strategies, run_dir=run_dir)
 
-    ranked = result.summary.sort_values(VALIDATION_PAYOUT_PROXY, ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):
         print(f"cache: {run_dir}\n")
-        print(ranked[REPORTED_COLUMNS].to_string(float_format=lambda v: f"{v:.6f}"))
+        print(ranked_table(result).to_string(float_format=lambda v: f"{v:.6f}"))
 
     if baseline_problem is None:
         baseline = result.summary.loc[BASELINE_ROW]
-        unverified = "" if record.verified else " (unverified: this cache predates recorded strategies)"
+        unverified = (
+            ""
+            if record.targets_recorded
+            else " (fit target unverified: this cache predates recorded fit targets)"
+            if record.verified
+            else " (unverified: this cache predates recorded strategies)"
+        )
         print(f"\nbaseline ({BASELINE_ROW}): {VALIDATION_PAYOUT_PROXY} {baseline[VALIDATION_PAYOUT_PROXY]:.6f}{unverified}")
     else:
-        # Loud on purpose: a baseline that quietly goes missing (or is swapped for a
-        # nearby row) is the defect the old string constant was.
         print(f"\nBASELINE UNAVAILABLE: this cache cannot express PRODUCTION_STRATEGY: {baseline_problem}")
     print(f"written to {run_dir}")
 

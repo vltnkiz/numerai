@@ -21,8 +21,8 @@ The `MIN_VALIDATION_MEAN_CORR` gate lives with the submission it guards, in
 
 `scripts/run_pipeline.py` — no strategy argument — is what the Windows
 scheduled task runs; it always fits `zemir.config.PRODUCTION_STRATEGY`. See
-[Scheduling](#scheduling) and
-[docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md](../../docs/adr/0001-the-live-entrypoint-runs-one-named-strategy.md).
+[Scheduling](#scheduling), and the script's docstring for why it must never
+grow a strategy flag (issue #78).
 
 ## Live scores: what Numerai actually scored
 
@@ -44,8 +44,7 @@ live (Numerai's scores, resolved rounds only):
 The headline averages resolved rounds only. `payout_score` prices every round
 by the current formula, before stake, payout factor and clipping. Each row
 also keeps the round's own `payout_score` under the multipliers Numerai listed
-for it. See
-[docs/adr/0003-live-scores-come-from-numerai.md](../../docs/adr/0003-live-scores-come-from-numerai.md).
+for it. See issue #106.
 
 ## Scheduling
 
@@ -223,18 +222,27 @@ CONTEXT.md, "Explanation"). It is gain/weight scale only; there is no SHAP.
 
 ### What it measures, and why those metrics
 
-Numerai paid `0.75 * corr20 + 2.25 * mmc20` on rounds up to 1342 — **MMC
-weighted three times CORR** — and pays `3 * corr60 + 15 * mmc60` from round
-1343. The harness still ranks on the first, as a proxy (docs/adr/0003). Plain Spearman (the legacy `summarize_era_spearman`) is not a payout metric, so the
-harness uses `numerai-tools`, Numerai's own reference implementation, for both:
+Numerai pays `3 * corr60 + 15 * mmc60` from round 1343 — **MMC weighted five
+times CORR** — against the 60-day Ender target, `target_ender_60` (issue #105).
+Every paid number here is measured against that **scoring target**, whatever
+each model was fitted on (`ModelSpec.target`). Plain Spearman (the legacy
+`summarize_era_spearman`) is not a payout metric, so the harness uses
+`numerai-tools`, Numerai's own reference implementation, for both:
 
 - **`mean_corr`** — `numerai_corr` per era over the full validation span.
 - **`mean_mmc`** — MMC against `meta_model.parquet`, which covers a *window* of
   validation (96 eras in v5.0), not all of it. `mean_corr_window` is CORR
   restricted to those same eras, so the two halves of the proxy are comparable.
-- **`validation_payout_proxy`** — the weighted combination, and the column
+- **`validation_payout_proxy_60`** — the weighted combination, and the column
   sweeps rank by. A backtest ranking, not what any round pays: that is
-  Numerai's, in `live_scores.jsonl`.
+  Numerai's, in `live_scores.jsonl`. Not comparable with the retired 20-day
+  `validation_payout_proxy` in tables from before issue #105.
+- **`lead` / `lead_low` / `lead_high`** — each row's proxy lead over the
+  `production` row, with a 95% moving-block bootstrap interval over 12-era
+  blocks: overlapping 60-day targets leave the ~89-era window only about eight
+  independent samples. Printed, never applied: whether a lead ships is decided
+  in the PR that changes `STRATEGIES`, together with whether the row also
+  holds `mean_corr` over all of validation, which the gate reads.
 - **`max_feature_corr`** — largest absolute feature exposure per era, so
   neutralization's effect is visible rather than inferred.
 - **`sharpe` / `smart_sharpe`** — risk read-outs. Not payout metrics.
@@ -248,13 +256,20 @@ predictions to the blended, neutralized prediction. The live run is its
 one-strategy case, so the harness cannot measure something the live run does
 not do. A row may differ from what the cache was fitted with only in what needs
 no refit: the blend weights and every neutralization. `score_harness.py` checks
-the rest (`features`, `trainer`, `params`) against the strategy the cache
-recorded in `fit_config.json`, and refuses a mismatch. A cache fitted before
-that was recorded can only be checked by model name, and its output says
-`unverified`.
+the rest (`features`, `target`, `trainer`, `params`) against the strategy
+the cache recorded in `fit_config.json`, and refuses a mismatch. A cache fitted
+before that was recorded can only be checked by model name, and its output says
+`unverified`; one fitted before fit targets were recorded is checked on
+everything else and says `fit target unverified`.
 
-The table always carries a `production` row: `PRODUCTION_STRATEGY` scored like
-every other row. Its `validation_payout_proxy` is the baseline. A cache that cannot express it (a
+A cache holds predictions and nothing they are scored against: `score_configs`
+reads `target_ender_60` from `validation.parquet` when it scores, so an older
+cache is rescored on the current payout target without a refit. Each model
+drops the last eras of train its fit target's returns overlap with validation:
+4 for a 20-day target, 12 for a 60-day one.
+
+Every sweep's table carries a `production` row: `PRODUCTION_STRATEGY` scored like
+every other row. Its `validation_payout_proxy_60` is the baseline. A cache that cannot express it (a
 model missing, or fitted with other hyperparameters) prints `BASELINE
 UNAVAILABLE` and the reason rather than substituting a nearby row.
 

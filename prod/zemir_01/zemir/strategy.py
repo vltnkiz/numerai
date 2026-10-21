@@ -94,8 +94,15 @@ class ModelSpec:
     measures feature exposure against, not what any model trains on and not
     what anything is neutralized against (a `Neutralization` names its own).
 
+    `target` names the column the model is fitted on (`target_ender_20`,
+    `target_ender_60`, ...). Required, because it is a choice the harness
+    measures rather than a fact: what a model is *scored* against is always
+    `zemir.scoring.SCORING_TARGET`, Numerai's payout target, whatever it was
+    fitted on (#105). It also sets how many of train's last eras the fit drops
+    (`fit_purge_eras`).
+
     `neutralization` is applied to this model's predictions *before* the blend
-    (`zemir.blend`); `None` applies nothing. Unlike the three fields above it
+    (`zemir.blend`); `None` applies nothing. Unlike the four fields above it
     is not a property of the fit — it is applied to cached predictions in
     seconds, which is why a harness cache can be rescored under a different one
     (`zemir.harness.score_configs`) but not under a different `params`.
@@ -113,9 +120,28 @@ class ModelSpec:
 
     name: str
     features: str
+    target: str
     trainer: str
     params: Mapping[str, object] = field(default_factory=dict)
     neutralization: Neutralization | None = None
+
+
+# How many weekly eras each fit target's returns span: 20 business days are
+# four weeks, 60 are twelve. The last that many train eras have targets that
+# overlap validation's first eras, so a fit drops them and a validation score
+# measures nothing train already saw (#105).
+TARGET_HORIZON_ERAS: Mapping[str, int] = {"target_ender_20": 4, "target_ender_60": 12}
+
+
+def fit_purge_eras(target: str) -> int:
+    """How many of train's last eras a model fitted on `target` drops."""
+    try:
+        return TARGET_HORIZON_ERAS[target]
+    except KeyError:
+        raise KeyError(
+            f"fit target {target!r} has no known horizon (have: {sorted(TARGET_HORIZON_ERAS)}); "
+            "add it to TARGET_HORIZON_ERAS"
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -216,6 +242,13 @@ def build_trainer(spec: ModelSpec) -> Trainer:
     return trainer
 
 
+# The fit target of a model recorded before `ModelSpec.target` existed. Those
+# caches were fitted on `target_ender_20` from #64 on and on the dataset's
+# `target` alias before it, and the record cannot say which, so a scorer skips
+# the comparison rather than guess (`zemir.harness.check_scoreable`).
+UNRECORDED_TARGET = "unrecorded"
+
+
 def strategy_from_record(record: Mapping[str, object]) -> Strategy:
     """A `Strategy` rebuilt from `dataclasses.asdict`'s JSON round trip (`fit_config.json`'s `strategy`).
 
@@ -243,6 +276,7 @@ def strategy_from_record(record: Mapping[str, object]) -> Strategy:
             ModelSpec(
                 name=m["name"],
                 features=m["features"],
+                target=m.get("target", UNRECORDED_TARGET),
                 trainer=m["trainer"],
                 params=dict(m["params"]),
                 neutralization=neutralization(m["neutralization"]),

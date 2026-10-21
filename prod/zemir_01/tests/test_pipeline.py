@@ -19,6 +19,8 @@ from zemir.pipeline import (
     score_run,
 )
 from zemir.scoring import (
+    LEGACY_SPEARMAN_TARGET,
+    SCORING_TARGET,
     VALIDATION_PAYOUT_PROXY,
     era_numerai_corr,
     era_spearman,
@@ -127,7 +129,7 @@ def test_the_gate_reads_the_submitted_blend_not_the_raw_one(tmp_path, fake_train
     result = _run(tmp_path, strategy, "neutralized-away")
     raw_corr = era_numerai_corr(
         result.validation_predictions[[RAW_BLEND]],
-        result.validation["target"],
+        result.validation[SCORING_TARGET],
         result.validation["era"],
     )[RAW_BLEND].mean()
 
@@ -143,12 +145,30 @@ def test_gate_json_is_the_gates_whole_record(tmp_path, fake_trainers):
     gate = json.loads((result.run_dir / "gate.json").read_text())
     assert gate == {
         "metric": "numerai_corr",
+        "target": SCORING_TARGET,
         "artifact": SUBMITTED_BLEND,
         "eras": 5,
         "mean_corr": result.gate_corr,
         "threshold": MIN_VALIDATION_MEAN_CORR,
         "passed": True,
     }
+
+
+def test_the_gate_scores_against_the_scoring_target_not_the_fit_target(tmp_path, fake_trainers):
+    """A fit that tracks Ender20 fails the gate when Numerai's payout target moves against it (#105)."""
+    dataset = make_dataset()
+    dataset.validation[SCORING_TARGET] = -dataset.validation["target_ender_20"]
+
+    result = run_pipeline(
+        LIVE,
+        run_id="moved-target",
+        strategy=_strategy(predict_column_spec("linear", "medium", SIGNAL_COLUMN)),
+        feature_sets=FEATURE_SETS,
+        dataset=dataset,
+        runs_dir=tmp_path,
+    )
+
+    assert not record_gate(result, threshold=MIN_VALIDATION_MEAN_CORR)["passed"]
 
 
 def test_run_pipeline_scores_nothing_but_the_gate(tmp_path, fake_trainers):
@@ -186,10 +206,13 @@ def test_score_run_keeps_the_spearman_numbers_the_old_pipeline_produced(tmp_path
 
     scores = score_run(result, meta_model=_meta_model(result), scoring_universe=FEATURE_SETS["medium"])
 
-    frame = result.validation[["era", "target"]]
+    frame = result.validation[["era", LEGACY_SPEARMAN_TARGET]]
     for name in ("m1", "m2", RAW_BLEND):
         old = summarize_era_spearman(
-            era_spearman(frame.assign(prediction=result.validation_predictions[name]))
+            era_spearman(
+                frame.assign(prediction=result.validation_predictions[name]),
+                target_col=LEGACY_SPEARMAN_TARGET,
+            )
         )
         assert scores.spearman[name].mean_corr == old.mean_corr
         assert scores.spearman[name].smart_sharpe == old.smart_sharpe
@@ -217,20 +240,25 @@ def _logged(tmp_path, *, scored=True):
     )
     log = tmp_path / "score_log.jsonl"
     append_score_log(
-        run_id="20260926T120000Z", target_column="target", gate=gate, scores=scores,
+        run_id="20260926T120000Z",
+        fit_targets={"m1": "target_ender_20", "m2": "target_ender_20"},
+        gate=gate,
+        scores=scores,
         submission_id="sub-1", log_path=log, now=datetime(2026, 9, 26, 13, tzinfo=timezone.utc),
     )
     return result, json.loads(log.read_text().splitlines()[-1])
 
 
-def test_a_schema_3_entry_nests_by_artifact_then_by_vocabulary(tmp_path, fake_trainers):
+def test_a_schema_4_entry_nests_by_artifact_then_by_vocabulary(tmp_path, fake_trainers):
     result, entry = _logged(tmp_path)
 
     assert list(entry) == [
-        "schema", "run_id", "target_column", "gate",
+        "schema", "run_id", "scoring_target", "fit_targets", "gate",
         "models", "raw_blend", "submitted_blend", "submission_id",
     ]
-    assert entry["schema"] == SCORE_LOG_SCHEMA == 3
+    assert entry["schema"] == SCORE_LOG_SCHEMA == 4
+    assert entry["scoring_target"] == SCORING_TARGET
+    assert entry["fit_targets"] == {"m1": "target_ender_20", "m2": "target_ender_20"}
     assert list(entry["models"]) == ["m1", "m2"]
     # Spearman stays exactly where schema 1 had it, and nowhere new.
     for artifact in (*entry["models"].values(), entry["raw_blend"]):
@@ -255,7 +283,7 @@ def test_a_logged_paid_row_is_the_run_directorys_harness_row(tmp_path, fake_trai
 
 
 def test_a_live_run_records_no_payout_of_its_own(tmp_path, fake_trainers):
-    """What Numerai pays comes from Numerai (docs/adr/0003); the harness's proxy stays in the harness."""
+    """What Numerai pays comes from Numerai (#106); the harness's proxy stays in the harness."""
     result, entry = _logged(tmp_path)
 
     table = pd.read_csv(result.run_dir / "scores.csv", index_col="config")
@@ -280,7 +308,7 @@ def test_a_failed_score_keeps_the_entry_its_gate_and_its_submission(tmp_path, fa
     assert entry["submission_id"] == "sub-1"
 
 
-def test_schema_1_entries_survive_a_schema_3_append_untouched_and_still_prune(tmp_path, fake_trainers):
+def test_schema_1_entries_survive_a_schema_4_append_untouched_and_still_prune(tmp_path, fake_trainers):
     """Old entries are read through their missing `schema`, never migrated (issue #98)."""
     log = tmp_path / "score_log.jsonl"
     expired = json.dumps({**json.loads(_SCHEMA_1_LINE), "run_id": "20240101T120000Z"})
@@ -291,7 +319,7 @@ def test_schema_1_entries_survive_a_schema_3_append_untouched_and_still_prune(tm
     kept, new = log.read_text().splitlines()
     assert kept == _SCHEMA_1_LINE
     assert "schema" not in json.loads(kept)
-    assert json.loads(new)["schema"] == 3
+    assert json.loads(new)["schema"] == 4
 
 
 def test_run_columns_adds_the_scoring_universe_and_nothing_for_production_shaped_strategies():
@@ -323,6 +351,8 @@ def test_run_pipeline_fits_two_specs_at_different_widths_in_one_run(tmp_path, fa
     assert {"narrow_model", "wide_model"} <= set(result.validation_predictions.columns)
     config = json.loads((result.run_dir / "config.json").read_text())
     assert config["model_features"] == {"narrow_model": "narrow", "wide_model": "medium"}
+    assert config["model_targets"] == {"narrow_model": "target_ender_20", "wide_model": "target_ender_20"}
+    assert config["scoring_target"] == SCORING_TARGET
 
 
 def _two_models(m2_neutralization=None, blend_neutralization=None):

@@ -25,22 +25,10 @@ from zemir.harness import (
     PREDICTIONS_FILENAME,
     load_fit_record,
     rank_feature_exposure,
+    ranked_table,
     score_configs,
+    with_baseline,
 )
-from zemir.scoring import VALIDATION_PAYOUT_PROXY
-
-REPORTED_COLUMNS = [
-    "eras",
-    "mean_corr",
-    "sharpe",
-    "smart_sharpe",
-    "mmc_eras",
-    "mean_corr_window",
-    "mean_mmc",
-    "mmc_sharpe",
-    "max_feature_corr",
-    VALIDATION_PAYOUT_PROXY,
-]
 
 
 def latest_cache(harness_dir: Path) -> Path:
@@ -70,15 +58,17 @@ def main() -> None:
         models=models,
         weights=weights,
     )
+    strategies, baseline_problem = with_baseline(strategies, record)
     result = score_configs(strategies, run_dir=run_dir)
 
-    ranked = result.summary.sort_values(VALIDATION_PAYOUT_PROXY, ascending=False)
     with pd.option_context("display.width", 200, "display.max_columns", None):
         print(f"cache: {run_dir}\n")
         print("feature exposure ranking (top 10, mean |corr| across eras):")
         print(ranking.head(10).to_string(float_format=lambda v: f"{v:.6f}"))
         print()
-        print(ranked[REPORTED_COLUMNS].to_string(float_format=lambda v: f"{v:.6f}"))
+        print(ranked_table(result).to_string(float_format=lambda v: f"{v:.6f}"))
+    if baseline_problem is not None:
+        print(f"\nBASELINE UNAVAILABLE: this cache cannot express PRODUCTION_STRATEGY: {baseline_problem}")
     print(f"\nwritten to {run_dir}")
 
 

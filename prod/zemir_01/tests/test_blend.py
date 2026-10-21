@@ -11,7 +11,7 @@ FEATURE_SETS = {"pair": ("f1", "f2"), "all4": tuple(FEATURES)}
 
 
 def _spec(name: str, neutralization: Neutralization | None = None) -> ModelSpec:
-    return ModelSpec(name=name, features="all4", trainer="ols", neutralization=neutralization)
+    return ModelSpec(name=name, features="all4", target="target_ender_20", trainer="ols", neutralization=neutralization)
 
 
 def _strategy(*specs: ModelSpec, weights=None, neutralization=None) -> Strategy:

@@ -33,9 +33,10 @@ import pandas as pd
 from zemir.config import LIVE, STRATEGIES
 from zemir.data import feature_columns as _feature_columns
 from zemir.data import load_meta_model, load_split, scoring_window
+from zemir.fitting import fit_rows
 from zemir.models import train_xgboost
 from zemir.pipeline import RUNS_DIR
-from zemir.scoring import era_mmc, era_numerai_corr
+from zemir.scoring import SCORING_TARGET, era_mmc, era_numerai_corr
 
 PROBE_DIR = RUNS_DIR / "probe_era_budget"
 
@@ -62,10 +63,14 @@ def main() -> None:
         config.feature_set,
         "train",
         feature_names=feature_columns,
-        target_column=config.target_column,
     )
-    train_df = scoring_window(train_df, config.max_eras)
-    X, y, era = train_df[feature_columns], train_df["target"], train_df["era"]
+    spec = STRATEGIES["era_boost"].models[0]
+    rows = fit_rows(train_df, spec.target, config.max_eras)
+    X, y, era = (
+        train_df.loc[rows, feature_columns],
+        train_df.loc[rows, spec.target],
+        train_df.loc[rows, "era"],
+    )
     train_df = None
 
     validation_df = load_split(
@@ -73,7 +78,6 @@ def main() -> None:
         config.feature_set,
         "validation",
         feature_names=feature_columns,
-        target_column=config.target_column,
     )
     validation_df = scoring_window(validation_df, config.max_eras)
 
@@ -90,8 +94,8 @@ def main() -> None:
 
         preds = predictor.predict(validation_df[feature_columns])
         frame = pd.DataFrame({"prediction": preds}, index=validation_df.index)
-        corr = era_numerai_corr(frame, validation_df["target"], validation_df["era"])
-        mmc = era_mmc(frame, validation_df["target"], validation_df["era"], meta_model)
+        corr = era_numerai_corr(frame, validation_df[SCORING_TARGET], validation_df["era"])
+        mmc = era_mmc(frame, validation_df[SCORING_TARGET], validation_df["era"], meta_model)
         row = {
             "iteration": iteration,
             "trees": iteration * xgb_kwargs["trees_per_step"],

@@ -1,4 +1,4 @@
-"""Numerai's per-round record (docs/adr/0003), from canned API responses: nothing here reaches Numerai."""
+"""Numerai's per-round record (#106), from canned API responses: nothing here reaches Numerai."""
 
 import json
 from datetime import datetime, timezone

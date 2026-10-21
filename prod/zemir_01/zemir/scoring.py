@@ -12,7 +12,7 @@ from scipy.stats import spearmanr
 def era_spearman(
     df: pd.DataFrame,
     *,
-    target_col: str = "target",
+    target_col: str,
     prediction_col: str = "prediction",
     era_col: str = "era",
 ) -> pd.Series:
@@ -25,10 +25,17 @@ def era_spearman(
 
     Kept for exactly one reason: `score_log.jsonl`'s schema 1 entries recorded
     `mean_corr`, `sharpe` and `smart_sharpe` in this vocabulary since issue
-    #68, and the raw blend's Spearman series continues through schema 2 so
-    they stay comparable. Once the prune has removed the last schema 1 entry,
-    delete this and `summarize_era_spearman` (docs/adr/0002). Nothing new
+    #68, and the raw blend's Spearman series continues through every later
+    schema so they stay comparable — against `LEGACY_SPEARMAN_TARGET`, the
+    target those entries were taken on, not the scoring target (#105). Once
+    the 365-day prune has removed the last schema 1 entry, delete this,
+    `summarize_era_spearman` and `LEGACY_SPEARMAN_TARGET` (#98). Nothing new
     should be measured on it (issue #96).
+
+    The series continues only approximately: validation is refreshed weekly
+    (#104), so the frame grows past the 655 eras every schema 1 entry was
+    measured on. Fresh data won over continuity. Where an exact comparison
+    matters, recompute both sides on the current copy.
     """
     corrs = df.groupby(era_col).apply(
         lambda d: spearmanr(d[prediction_col], d[target_col])[0]
@@ -108,13 +115,13 @@ def validate_predictions(predictions: pd.Series, era: pd.Series) -> None:
 # Numerai's *paid* metrics.
 #
 # `era_spearman` above uses plain Spearman, which is not what Numerai pays
-# on. `validation_payout_proxy` is `0.75 * corr20 + 2.25 * mmc20`, the formula
-# Numerai paid rounds up to 1342 on — MMC carries three times the weight of
-# CORR — so a comparison made on Spearman alone can pick the wrong
-# architecture. Rounds from 1343 pay on a different formula (60-day scores,
-# multipliers read per round from Numerai: `zemir.live_scores`), so this is a
-# ranking proxy for the harness and never a prediction of what a round pays. These wrap `numerai-tools`, Numerai's own reference
-# implementation, rather than reimplementing the formulas.
+# on. `validation_payout_proxy_60` prices CORR and MMC with `PAYOUT_MULTIPLIERS`,
+# the formula Numerai pays rounds from 1343 on — MMC carries five times the
+# weight of CORR — so a comparison made on Spearman alone can pick the wrong
+# architecture. It is a ranking proxy for the harness and never a prediction
+# of what a round pays: that comes from Numerai (`zemir.live_scores`). These
+# wrap `numerai-tools`, Numerai's own reference implementation, rather than
+# reimplementing the formulas.
 #
 # Everything below this line is the vocabulary the live run and the harness
 # share, composed by `score_predictions`. Everything above it survives only to
@@ -125,11 +132,30 @@ def validate_predictions(predictions: pd.Series, era: pd.Series) -> None:
 # exactly (delta 0.00e+00) — see issue #26.
 # ---------------------------------------------------------------------------
 
-PAYOUT_CORR_MULTIPLIER = 0.75
-PAYOUT_MMC_MULTIPLIER = 2.25
-# The harness's ranking column. Named for what it is, so no table can pass it off
-# as Numerai's payout (see docs/adr/0003-live-scores-come-from-numerai.md).
-VALIDATION_PAYOUT_PROXY = "validation_payout_proxy"
+# The payout target: what Numerai scores CORR and MMC against, from the
+# Ender-60 cutover at round 1343 (#105). Every paid metric in this repo — the
+# gate, the history log, the harness — is measured against it, whatever
+# target a model was fitted on (`ModelSpec.target`). Numerai changes it on its
+# own schedule, so confirm it against Numerai's scoring docs, never against
+# the dataset's generic `target` alias (#64).
+SCORING_TARGET = "target_ender_60"
+# The target `era_spearman`'s series has always been measured against, kept
+# only so the history log's legacy Spearman series runs unbroken.
+LEGACY_SPEARMAN_TARGET = "target_ender_20"
+# Numerai's payout multipliers from round 1343 on. Numerai lists them per
+# round, so `zemir.live_scores` prices each round with that round's own; this
+# is the current formula, which the harness proxy and every round's
+# `reference_payout_score` share. Update it when Numerai lists new
+# multipliers on new rounds.
+PAYOUT_MULTIPLIERS = {"corr60": 3.0, "mmc60": 15.0}
+# The harness's ranking column. Named for what it is, so no table can pass it
+# off as Numerai's payout, and with its horizon, so no table can pass it off as
+# the retired 20-day `validation_payout_proxy` (#105, #106).
+VALIDATION_PAYOUT_PROXY = "validation_payout_proxy_60"
+# Consecutive eras whose 60-day targets overlap: an era is a week, and 60
+# business days are twelve of them. The bootstrap resamples blocks this long so
+# its interval does not treat overlapping eras as independent draws (#105).
+BOOTSTRAP_BLOCK_ERAS = 12
 
 
 def _by_era(era: pd.Series, score: Callable[[pd.Index], pd.Series]) -> pd.DataFrame:
@@ -233,9 +259,8 @@ def summarize_era_scores(
 ) -> pd.DataFrame:
     """One row per prediction column — the comparison table.
 
-    `VALIDATION_PAYOUT_PROXY` weights CORR and MMC as Numerai did for rounds up
-    to 1342, and takes CORR from the
-    meta-model window so both halves are measured over the same eras. `mean_corr`
+    `VALIDATION_PAYOUT_PROXY` weights CORR and MMC with `PAYOUT_MULTIPLIERS`,
+    and takes CORR from the meta-model window so both halves are measured over the same eras. `mean_corr`
     over the full validation span is reported alongside, and the two are not
     interchangeable.
 
@@ -264,12 +289,55 @@ def summarize_era_scores(
             "max_feature_corr": exposure_by_era.mean(),
         }
     )
-    summary[VALIDATION_PAYOUT_PROXY] = (
-        PAYOUT_CORR_MULTIPLIER * summary["mean_corr_window"]
-        + PAYOUT_MMC_MULTIPLIER * summary["mean_mmc"]
-    )
+    summary[VALIDATION_PAYOUT_PROXY] = _proxy(summary["mean_corr_window"], summary["mean_mmc"])
     summary.index.name = "config"
     return summary
+
+
+def _proxy(corr: pd.Series | float, mmc: pd.Series | float) -> pd.Series | float:
+    return PAYOUT_MULTIPLIERS["corr60"] * corr + PAYOUT_MULTIPLIERS["mmc60"] * mmc
+
+
+def proxy_lead_interval(
+    corr_by_era: pd.DataFrame,
+    mmc_by_era: pd.DataFrame,
+    baseline: str,
+    *,
+    level: float = 0.95,
+    block: int = BOOTSTRAP_BLOCK_ERAS,
+    draws: int = 2000,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Each column's `VALIDATION_PAYOUT_PROXY` lead over `baseline`, with a moving-block bootstrap interval.
+
+    Measured over the meta-model window, as the proxy is. Resamples runs of
+    `block` consecutive eras, so eras whose targets overlap are drawn together
+    rather than counted as independent: at 60 days, ~89 window eras hold only
+    about eight independent samples, and an interval that ignored that would
+    be far too narrow (#105). Reported, never applied: whether a lead is worth
+    shipping is decided in the PR that would ship it.
+
+    Columns `lead`, `lead_low`, `lead_high`; `baseline`'s own row is all zero.
+    """
+    window = corr_by_era.loc[mmc_by_era.index]
+    lead = _proxy(window, mmc_by_era).sub(_proxy(window, mmc_by_era)[baseline], axis=0)
+    values = lead.to_numpy(dtype=float)
+    n = len(values)
+    block = min(block, n)
+    starts_per_draw = -(-n // block)
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, n - block + 1, size=(draws, starts_per_draw))
+    rows = (starts[:, :, None] + np.arange(block)).reshape(draws, -1)[:, :n]
+    means = values[rows].mean(axis=1)
+    tail = (1 - level) / 2
+    return pd.DataFrame(
+        {
+            "lead": values.mean(axis=0),
+            "lead_low": np.quantile(means, tail, axis=0),
+            "lead_high": np.quantile(means, 1 - tail, axis=0),
+        },
+        index=lead.columns,
+    ).rename_axis("config")
 
 
 def _smart_sharpe(corrs: pd.Series) -> float:

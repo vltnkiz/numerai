@@ -34,6 +34,7 @@ def test_two_era_boosts_at_different_depths_fit_and_predict_as_distinct_models()
             ModelSpec(
                 name="era_boost_shallow",
                 features="medium",
+                target="target_ender_20",
                 trainer="xgboost",
                 params={
                     "trees_per_step": 5,
@@ -45,6 +46,7 @@ def test_two_era_boosts_at_different_depths_fit_and_predict_as_distinct_models()
             ModelSpec(
                 name="era_boost_deep",
                 features="medium",
+                target="target_ender_20",
                 trainer="xgboost",
                 params={
                     "trees_per_step": 5,
@@ -71,7 +73,7 @@ def _strategy(
 ) -> Strategy:
     return Strategy(
         models=tuple(
-            ModelSpec(name=f"m{i}", features=name, trainer="ols", neutralization=model_neutralization)
+            ModelSpec(name=f"m{i}", features=name, target="target_ender_20", trainer="ols", neutralization=model_neutralization)
             for i, name in enumerate(feature_sets)
         ),
         blend=BlendSpec(
